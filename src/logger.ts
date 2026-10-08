@@ -19,8 +19,12 @@ const REDACT_PATHS = [
   'adminToken',
   'accountsEncryptionKey',
   'googleOauthClientSecret',
-  'req.headers.authorization',
-  'req.headers.cookie',
+  // Bracket notation for header paths (pino's docs recommend explicit
+  // bracket form for header names that contain hyphens).
+  'req.headers["authorization"]',
+  'req.headers["cookie"]',
+  'req.headers["x-goog-api-key"]',
+  'config.geminiApiKeys',
 ];
 
 export const logger = pino({
