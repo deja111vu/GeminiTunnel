@@ -26,6 +26,11 @@ export function keyOrOAuth(opts: KeyOrOAuthOptions) {
     // Reject ?key= in the query string outright — keys in URLs land in
     // access logs, browser history, and referer headers. Always 400, even
     // when key path is disabled.
+    //
+    // Asymmetric by design: only `?key=AIza...` (well-formed) returns
+    // 400. A truncated `?key=AIza` falls through to the next handler.
+    // The regex is public so this is not an information leak, and a
+    // shorter prefix has zero value to a legitimate client.
     const url = new URL(c.req.url);
     const queryKey = url.searchParams.get('key');
     if (queryKey !== null && KEY_RE.test(queryKey)) {

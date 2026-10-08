@@ -151,26 +151,66 @@ describe('keyOrOAuth middleware', () => {
       body: '{}',
     });
     expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('key_in_query_string_forbidden');
   });
 
-  it('clientAuth runs BEFORE keyOrOAuth: wrong Bearer + valid x-goog-api-key → 403', async () => {
-    // Defense in depth: a configured CLIENT_API_KEY gates /v1/* before
-    // the dispatcher sees the request. Even with a perfectly valid API
-    // key in x-goog-api-key, the wrong Bearer is rejected first.
+  describe('clientAuth → keyOrOAuth ordering', () => {
+    // The middleware order in src/server.ts is
+    //   bodyCap → clientAuth → keyOrOAuth → route
+    // The clientAuth stub in makeApp mirrors that ordering. These tests
+    // pin the gate so a future swap of requireClientKey's branches
+    // (401 vs 403) is caught by the suite, not by a 3am page.
+    const CLIENT_KEY = 'super-secret-client-key-16+';
     const fakeFetch: typeof fetch = async () =>
       new Response('{"id":"x"}', { status: 200 });
-    const pool = new KeyPool({ keys: [K1], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
-    const client = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com', fetchImpl: fakeFetch });
-    const app = makeApp({ enabled: true, pool, client, clientApiKey: 'super-secret-client-key-16+' });
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-goog-api-key': K1,
-        authorization: 'Bearer wrong',
-      },
-      body: validBody,
+    function makeClientApp() {
+      const pool = new KeyPool({ keys: [K1], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+      const client = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com', fetchImpl: fakeFetch });
+      return makeApp({ enabled: true, pool, client, clientApiKey: CLIENT_KEY });
+    }
+
+    it('no Authorization header → 401 (clientAuth fires first)', async () => {
+      const app = makeClientApp();
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': K1 },
+        body: validBody,
+      });
+      expect(res.status).toBe(401);
     });
-    expect(res.status).toBe(403);
+
+    it('wrong Bearer + valid x-goog-api-key → 403 (defense in depth)', async () => {
+      const app = makeClientApp();
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': K1,
+          authorization: 'Bearer wrong',
+        },
+        body: validBody,
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('correct Bearer + valid x-goog-api-key → 200 (request reaches upstream)', async () => {
+      // The success path: clientAuth passes, dispatcher hands the key
+      // to runKeyChat, the fake fetch returns 200. This guarantees the
+      // stub is wired the same way as the real server.
+      const app = makeClientApp();
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': K1,
+          authorization: `Bearer ${CLIENT_KEY}`,
+        },
+        body: validBody,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { id: string };
+      expect(body.id).toBe('x');
+    });
   });
 });

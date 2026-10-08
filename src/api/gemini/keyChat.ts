@@ -212,13 +212,22 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
       continue;
     }
   }
-  // Budget exhausted. lastFatalStatus can be any 4xx/5xx; pass through.
-  // null = network/connection failure across all keys → 502 Bad Gateway.
-  const status = (lastFatalStatus ?? 502) as 400 | 401 | 403 | 404 | 408 | 422 | 429 | 500 | 502 | 503 | 504;
+  // Budget exhausted. lastFatalStatus can be any 4xx from upstream (and
+  // in practice only 4xx — classifyKeyError routes 5xx to 'retry', so we
+  // never set lastFatalStatus to 5xx). null means we hit a network
+  // failure across all keys; 502 Bad Gateway is the conventional status
+  // for "upstream is unreachable from our side".
+  //
+  // Hono's c.json is typed for `ContentfulStatusCode` (a closed union),
+  // but upstream can return any 4xx. We pass through whatever the
+  // upstream returned; the runtime call accepts any number. The cast
+  // `as StatusCode` documents the intent (an HTTP status) without
+  // claiming we know the exact set of codes upstream may emit.
+  const status: number = lastFatalStatus ?? 502;
   // retriable for null (network) and 5xx; client should retry; 4xx fatal
   // means the request shape is wrong, retrying with the same body won't help.
   const retriable = lastFatalStatus == null || (lastFatalStatus >= 500 && lastFatalStatus < 600);
-  return c.json({ error: 'upstream_exhausted', retriable }, status);
+  return c.json({ error: 'upstream_exhausted', retriable }, status as Parameters<typeof c.json>[1]);
 }
 
 export interface KeyChatRouteDeps extends KeyChatDeps {

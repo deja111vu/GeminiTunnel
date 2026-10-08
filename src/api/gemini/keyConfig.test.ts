@@ -84,12 +84,18 @@ describe('KEY_RE drift', () => {
     expect(KEY_RE.source).toBe('^AIza[a-zA-Z0-9_-]{39}$');
   });
 
-  it('middleware.ts no longer inlines a copy of the regex', () => {
+  it('middleware.ts imports KEY_RE from keyConfig (not inlined)', () => {
     // The middleware should import KEY_RE, not redefine it. If someone
     // re-inlines the regex here, the inline form will drift from the
     // canonical parser.
     const src = readFileSync(`${repoRoot}/src/api/gemini/middleware.ts`, 'utf8');
+    // No inlined copy of the regex shape.
     expect(src).not.toMatch(/\/[\^]AIza/);
+    // And the import is actually present — a refactor that removed
+    // both the inline AND the import would leave the file referencing
+    // an undefined symbol at runtime.
+    expect(src).toMatch(/from\s+['"]\.\/keyConfig\.js['"]/);
+    expect(src).toMatch(/\bKEY_RE\b/);
   });
 
   it('config.ts inlined pattern matches KEY_RE.source', () => {
