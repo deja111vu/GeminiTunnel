@@ -31,7 +31,7 @@ async function main(): Promise<void> {
       cooldownMs: config.keyCooldownAfter429Ms,
       badTtlMs: config.keyBadTtlMs,
     });
-    keyClient = new KeyClient();
+    keyClient = new KeyClient({ timeoutMs: config.requestTimeoutMs });
     logger.info({ keyCount: config.geminiApiKeys.length }, 'Gemini API key path enabled');
   }
 

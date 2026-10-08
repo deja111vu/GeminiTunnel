@@ -214,7 +214,7 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
   }
   // Budget exhausted. lastFatalStatus can be any 4xx/5xx; pass through.
   // null = network/connection failure across all keys → 502 Bad Gateway.
-  const status: number = lastFatalStatus ?? 502;
+  const status = (lastFatalStatus ?? 502) as 400 | 401 | 403 | 404 | 408 | 422 | 429 | 500 | 502 | 503 | 504;
   // retriable for null (network) and 5xx; client should retry; 4xx fatal
   // means the request shape is wrong, retrying with the same body won't help.
   const retriable = lastFatalStatus == null || (lastFatalStatus >= 500 && lastFatalStatus < 600);

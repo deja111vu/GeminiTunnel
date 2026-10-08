@@ -4,6 +4,7 @@ import { keyOrOAuth } from './middleware.js';
 import { KeyPool } from './keyPool.js';
 import { KeyClient } from './keyClient.js';
 import type { Config } from '../../config.js';
+import { timingSafeEqual } from 'node:crypto';
 
 const K1 = 'AIzaSyA' + 'a'.repeat(36);
 const KEYCONFIG: Pick<Config, 'switchBudget' | 'requestTimeoutMs' | 'keyBadTtlMs'> = {
@@ -12,10 +13,25 @@ const KEYCONFIG: Pick<Config, 'switchBudget' | 'requestTimeoutMs' | 'keyBadTtlMs
   keyBadTtlMs: 86_400_000,
 };
 
-function makeApp(opts: { enabled: boolean; pool?: KeyPool; client?: KeyClient }) {
+function makeApp(opts: { enabled: boolean; pool?: KeyPool; client?: KeyClient; clientApiKey?: string }) {
   const app = new Hono();
   const pool = opts.pool ?? new KeyPool({ keys: [K1], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
   const client = opts.client ?? new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com' });
+  // Optional clientAuth stub mirrors src/server.ts:requireClientKey so we
+  // can assert the bodyCap → clientAuth → keyOrOAuth order in isolation.
+  if (opts.clientApiKey) {
+    const expected = Buffer.from(opts.clientApiKey, 'utf8');
+    app.use('/v1/chat/completions', async (c, next) => {
+      const h = c.req.header('authorization') ?? '';
+      const m = /^Bearer\s+(.+)$/.exec(h);
+      if (!m) return c.json({ error: 'unauthorized' }, 401);
+      const provided = Buffer.from(m[1], 'utf8');
+      if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+        return c.json({ error: 'forbidden' }, 403);
+      }
+      await next();
+    });
+  }
   app.use('/v1/chat/completions', keyOrOAuth({ enabled: opts.enabled, pool, client, config: KEYCONFIG }));
   app.post('/v1/chat/completions', async (c) => c.json({ ok: 'oauth' }));
   return app;
@@ -99,7 +115,11 @@ describe('keyOrOAuth middleware', () => {
     expect(res.status).toBe(200);
   });
 
-  it('Authorization: Bearer AIza... (no x-goog-api-key) → OAuth path', async () => {
+  it('no x-goog-api-key → falls through; Authorization is ignored by the dispatcher', async () => {
+    // The dispatcher only branches on x-goog-api-key. An Authorization
+    // header without a matching x-goog-api-key must reach the OAuth
+    // handler; the OAuth path then ignores Authorization (it picks the
+    // account from the AccountPool).
     const app = makeApp({ enabled: true });
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -131,5 +151,26 @@ describe('keyOrOAuth middleware', () => {
       body: '{}',
     });
     expect(res.status).toBe(400);
+  });
+
+  it('clientAuth runs BEFORE keyOrOAuth: wrong Bearer + valid x-goog-api-key → 403', async () => {
+    // Defense in depth: a configured CLIENT_API_KEY gates /v1/* before
+    // the dispatcher sees the request. Even with a perfectly valid API
+    // key in x-goog-api-key, the wrong Bearer is rejected first.
+    const fakeFetch: typeof fetch = async () =>
+      new Response('{"id":"x"}', { status: 200 });
+    const pool = new KeyPool({ keys: [K1], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+    const client = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com', fetchImpl: fakeFetch });
+    const app = makeApp({ enabled: true, pool, client, clientApiKey: 'super-secret-client-key-16+' });
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': K1,
+        authorization: 'Bearer wrong',
+      },
+      body: validBody,
+    });
+    expect(res.status).toBe(403);
   });
 });

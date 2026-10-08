@@ -8,13 +8,8 @@ import type { Context, Next } from 'hono';
 import { runKeyChat } from './keyChat.js';
 import { KeyClient } from './keyClient.js';
 import { KeyPool } from './keyPool.js';
+import { KEY_RE } from './keyConfig.js';
 import type { Config } from '../../config.js';
-
-// Mirror the regex from src/api/gemini/keyConfig.ts. Inline copy to avoid
-// pulling the whole parser (and the cycle it would create via config).
-// The unit tests in keyConfig.test.ts pin behaviour; if you change the
-// regex, change it there AND here.
-const KEY_RE: Readonly<RegExp> = /^AIza[a-zA-Z0-9_-]{39}$/;
 
 export interface KeyOrOAuthOptions {
   enabled: boolean;
