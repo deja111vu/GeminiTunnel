@@ -6,7 +6,9 @@ const hex32 = z.string().regex(/^[0-9a-fA-F]{64}$/, '64 hex chars (32 bytes)');
 // (the API code in src/api/codeassist/client.ts also accepts http for
 // the test fixtures on 127.0.0.1/::1). Plain http to any other host is
 // rejected because every upstream secret in flight (Bearer access_token)
-// would traverse the wire unencrypted.
+// would traverse the wire unencrypted. Embedded credentials
+// (https://user:pass@host/) are also rejected — they would silently
+// ship the operator's secrets to whatever host is in the URL.
 const urlSchema = z
   .string()
   .url()
@@ -14,6 +16,7 @@ const urlSchema = z
     (u) => {
       try {
         const parsed = new URL(u);
+        if (parsed.username || parsed.password) return false;
         if (parsed.protocol === 'https:') return true;
         // Allow http only to loopback — used by integration tests.
         return (
@@ -24,7 +27,7 @@ const urlSchema = z
         return false;
       }
     },
-    { message: 'must be https (or http to loopback only)' },
+    { message: 'must be https (or http to loopback only), no embedded credentials' },
   );
 
 // GOOGLE_OAUTH_CLIENT_SECRET: real Google secrets start with "GOCSPX-"

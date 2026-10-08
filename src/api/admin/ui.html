@@ -136,12 +136,13 @@ document.querySelectorAll('nav button').forEach((btn) => {
 $('#save-token').addEventListener('click', async () => {
   const t = $('#token').value.trim();
   if (!t) { toast('enter the admin token first', true); return; }
+  // Clear the in-memory input BEFORE the await so the token doesn't
+  // sit in the DOM during the network round-trip. An XSS that fires
+  // while we're awaiting would otherwise read the raw token and defeat
+  // the HttpOnly cookie we're about to set.
+  $('#token').value = '';
   try {
     await api('/admin/api/login', { method: 'POST', body: JSON.stringify({ token: t }) });
-    // Drop the in-memory input value — we no longer need it (cookie
-    // is set), and leaving it in the DOM is one DOM-read away from
-    // an XSS exfil.
-    $('#token').value = '';
     toast('signed in');
     loadAccounts();
   } catch (e) { toast(e.message, true); }

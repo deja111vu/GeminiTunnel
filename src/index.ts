@@ -36,25 +36,35 @@ async function main(): Promise<void> {
   });
   poller.start();
 
-  // Graceful shutdown: stop the poller and checkpoint the WAL on
-  // SIGINT/SIGTERM so a mid-iteration runOnce doesn't get cut off, and
-  // the on-disk WAL file is folded+truncated instead of leaving recent
-  // pages in a 0o600 sidecar with no checkpoint marker.
+  const { serve } = await import('@hono/node-server').catch(() => ({ serve: null }));
+
+  let server: { close: (cb?: (err?: Error) => void) => void } | null = null;
+  if (serve) {
+    server = serve({ fetch: app.fetch, port: config.port, hostname: config.host });
+  }
+
+  logger.info({ port: config.port, host: config.host }, 'gemini-tunnel starting');
+
+  // Graceful shutdown ordering matters: stop accepting new connections
+  // FIRST, then let in-flight handlers drain, then close the DB. Closing
+  // the DB while the HTTP server is still serving would 500 every
+  // in-flight request that touches the store. The poller also stops
+  // before the store close so its runOnce (which holds the DB) can't
+  // race the shutdown.
   const shutdown = (): void => {
     poller.stop();
-    store.close();
+    if (server) {
+      server.close((err) => {
+        if (err) logger.warn({ err: err.message }, 'http server close error');
+        store.close();
+      });
+    } else {
+      store.close();
+    }
     logger.info('gemini-tunnel shutting down');
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
-
-  const { serve } = await import('@hono/node-server').catch(() => ({ serve: null }));
-
-  if (serve) {
-    serve({ fetch: app.fetch, port: config.port, hostname: config.host });
-  }
-
-  logger.info({ port: config.port, host: config.host }, 'gemini-tunnel starting');
 }
 
 main().catch((err) => {

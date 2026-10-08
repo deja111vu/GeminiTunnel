@@ -11,6 +11,27 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 const BEARER_RE = /^Bearer\s+(.+)$/;
 
+// Reusable body-cap middleware. Mounted on /v1/* (auth-required) and
+// /admin/api/* (login is unauthenticated, so it MUST also be capped).
+// We only trust Content-Length when it's a valid number; chunked
+// transfer encoding is rejected on POST so an attacker can't hide a
+// giant body behind missing length.
+function bodyCap(c: import('hono').Context, next: import('hono').Next): Promise<Response> | Promise<void> {
+  const cl = c.req.header('content-length');
+  if (cl !== undefined) {
+    const n = Number(cl);
+    if (!Number.isFinite(n) || n < 0) {
+      return Promise.resolve(c.json({ error: 'bad_content_length' }, 400));
+    }
+    if (n > MAX_BODY_BYTES) {
+      return Promise.resolve(c.json({ error: 'body_too_large', limit: MAX_BODY_BYTES }, 413));
+    }
+  } else if (c.req.method === 'POST') {
+    return Promise.resolve(c.json({ error: 'content_length_required' }, 411));
+  }
+  return next();
+}
+
 // CLIENT_API_KEY (optional): if set, gates /v1/chat/* and /v1/models
 // on a bearer token that matches byte-for-byte. If unset, the proxy
 // relies on external auth (Cloudflare Access, firewall, mTLS) —
@@ -42,30 +63,12 @@ export function createApp(): Hono {
   const app = new Hono();
 
   // Edge body cap. Run BEFORE the route handlers so c.req.json() in
-  // /v1/chat/completions never sees a 200MB payload. We only trust
-  // Content-Length when it's a valid number — chunked transfer
-  // encoding is rejected too, so an attacker can't hide a giant
-  // body behind missing length.
-  app.use('/v1/*', async (c, next) => {
-    const cl = c.req.header('content-length');
-    if (cl !== undefined) {
-      const n = Number(cl);
-      if (!Number.isFinite(n) || n < 0) {
-        return c.json({ error: 'bad_content_length' }, 400);
-      }
-      if (n > MAX_BODY_BYTES) {
-        return c.json({ error: 'body_too_large', limit: MAX_BODY_BYTES }, 413);
-      }
-    } else {
-      // Reject missing Content-Length on POST. /v1/chat/completions
-      // must always send one. Avoids streamed giant bodies slipping
-      // through the cap.
-      if (c.req.method === 'POST') {
-        return c.json({ error: 'content_length_required' }, 411);
-      }
-    }
-    await next();
-  });
+  // any POST handler never sees a 200MB payload. /admin/api/login is
+  // intentionally unauthenticated (bootstrap), so it MUST also be
+  // protected by this cap — without it an attacker can OOM the process
+  // with a single huge POST to the login endpoint.
+  app.use('/v1/*', bodyCap);
+  app.use('/admin/api/*', bodyCap);
 
   // Optional client auth on the OpenAI surface. The middleware is a
   // no-op when CLIENT_API_KEY is not configured.

@@ -42,4 +42,17 @@ describe('config', () => {
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = REQUIRED_ENV.GOOGLE_OAUTH_CLIENT_SECRET;
     await expect(import('./config.js')).rejects.toThrow(/encryption/i);
   });
+
+  it('rejects UPSTREAM_BASE_URL with embedded credentials', async () => {
+    // F11 follow-up: a URL like https://user:pass@evil.com/ would pass
+    // the https-only check but ship the operator's secrets in every
+    // fetch to that host. The refinement must also reject parsed.username
+    // || parsed.password.
+    vi.resetModules();
+    process.env.ADMIN_TOKEN = REQUIRED_ENV.ADMIN_TOKEN;
+    process.env.ACCOUNTS_ENCRYPTION_KEY = REQUIRED_ENV.ACCOUNTS_ENCRYPTION_KEY;
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = REQUIRED_ENV.GOOGLE_OAUTH_CLIENT_SECRET;
+    process.env.UPSTREAM_BASE_URL = 'https://attacker:secret@evil.com/';
+    await expect(import('./config.js')).rejects.toThrow(/credential/i);
+  });
 });
