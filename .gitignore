@@ -1,9 +1,8 @@
+node_modules/
+dist/
 .env
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-.idea/
-.vscode/
+.env.local
+data/
 *.log
+coverage/
+.DS_Store
