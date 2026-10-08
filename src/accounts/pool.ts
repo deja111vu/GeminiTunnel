@@ -23,8 +23,10 @@ export class AccountPool {
   // Monotonic counter used as a tie-breaker when last_used_at values are
   // equal (Date.now() resolution is too coarse to distinguish back-to-back
   // touches on a fast machine; without this, stable sort hands account id=1
-  // to every pick).
-  private nextPickSeq = 0;
+  // to every pick). Start at 1 so 0 stays a sentinel for "never picked in
+  // this pool instance" and untouched accounts sort BEFORE the just-touched
+  // one (a picked id has seq>=1, an untouched id has seq=0).
+  private nextPickSeq = 1;
   private readonly pickSeqById = new Map<number, number>();
 
   constructor({ store, refresher, cooldownMs }: AccountPoolOptions) {
