@@ -1,5 +1,8 @@
 // keyClient.ts — fetch wrapper for the Gemini Developer API (OpenAI-compat
-// endpoint at /v1beta/openai/chat/completions). Auth via x-goog-api-key.
+// endpoint at /v1beta/openai/chat/completions). Auth uses
+// `Authorization: Bearer <key>` per the official OpenAI-compat docs
+// (https://ai.google.dev/gemini-api/docs/openai). `x-goog-api-key` is the
+// header for the *native* Gemini API, not the OpenAI-compat layer.
 // Reuses HttpError from codeassist/client.ts; the body-cap helper is a small
 // local copy because exporting it from codeassist/client.ts would widen the
 // module's public surface for a single consumer.
@@ -55,7 +58,7 @@ export class KeyClient {
 
   private headers(key: string): Record<string, string> {
     return {
-      'x-goog-api-key': key,
+      Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
       'User-Agent': 'gemini-tunnel/2.0',
     };

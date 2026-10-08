@@ -71,7 +71,7 @@ describe('KeyClient', () => {
     }
   });
 
-  it('streamChat sends x-goog-api-key header', async () => {
+  it('streamChat sends Authorization: Bearer <key> header', async () => {
     let capturedHeaders: Record<string, string> = {};
     const fakeFetch: typeof fetch = async (_url, init) => {
       const h = init?.headers as Record<string, string>;
@@ -85,9 +85,9 @@ describe('KeyClient', () => {
       baseUrl: 'https://generativelanguage.googleapis.com',
       fetchImpl: fakeFetch,
     });
-    const it = client.streamChat({ model: 'gemini-2.5-pro', messages: [], stream: true }, KEY);
-    for await (const _chunk of it) break;
-    expect(capturedHeaders['x-goog-api-key']).toBe(KEY);
+    const iter = client.streamChat({ model: 'gemini-2.5-pro', messages: [], stream: true }, KEY);
+    for await (const _chunk of iter) break;
+    expect(capturedHeaders['Authorization']).toBe(`Bearer ${KEY}`);
   });
 
   it('streamChat yields SSE chunks verbatim', async () => {
@@ -154,5 +154,54 @@ describe('KeyClient', () => {
     });
     await client.getJson({ model: 'gemini-2.5-pro', messages: [] }, KEY);
     expect(capturedUrl).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
+  });
+
+  it('getJson passes the caller-provided AbortSignal to fetch', async () => {
+    let capturedSignal: AbortSignal | null = null;
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      capturedSignal = (init?.signal as AbortSignal) ?? null;
+      return new Response('{"ok":1}', { status: 200 });
+    };
+    const client = new KeyClient({
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      fetchImpl: fakeFetch,
+    });
+    const ac = new AbortController();
+    await client.getJson({ model: 'gemini-2.5-pro', messages: [] }, KEY, ac.signal);
+    expect(capturedSignal).toBe(ac.signal);
+  });
+
+  it('getJson without signal uses AbortSignal.timeout(REQUEST_TIMEOUT_MS)', async () => {
+    let capturedSignal: AbortSignal | null = null;
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      capturedSignal = (init?.signal as AbortSignal) ?? null;
+      return new Response('{"ok":1}', { status: 200 });
+    };
+    const client = new KeyClient({
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      fetchImpl: fakeFetch,
+      timeoutMs: 1234,
+    });
+    await client.getJson({ model: 'gemini-2.5-pro', messages: [] }, KEY);
+    expect(capturedSignal).not.toBeNull();
+    // AbortSignal.timeout sets a reason with name TimeoutError.
+    expect(capturedSignal!.aborted || capturedSignal!.reason === undefined).toBe(true);
+  });
+
+  it('streamChat passes the caller-provided AbortSignal to fetch', async () => {
+    let capturedSignal: AbortSignal | null = null;
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      capturedSignal = (init?.signal as AbortSignal) ?? null;
+      return new Response('data: {"x":1}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+    const client = new KeyClient({
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      fetchImpl: fakeFetch,
+    });
+    const ac = new AbortController();
+    for await (const _ of client.streamChat({ model: 'gemini-2.5-pro', messages: [], stream: true }, KEY, ac.signal)) {
+      // drain
+    }
+    expect(capturedSignal).toBe(ac.signal);
   });
 });

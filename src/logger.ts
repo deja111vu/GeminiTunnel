@@ -16,14 +16,21 @@ const REDACT_PATHS = [
   '*.Cookie',
   '*.password',
   '*.Password',
+  // x-goog-api-key at any depth (e.g. if a future `fetch init` debug line
+  // accidentally logs a native-Gemini request). Belt-and-braces.
+  '*.x-goog-api-key',
+  '*.X-Goog-Api-Key',
   'adminToken',
   'accountsEncryptionKey',
   'googleOauthClientSecret',
   // Bracket notation for header paths (pino's docs recommend explicit
   // bracket form for header names that contain hyphens).
   'req.headers["authorization"]',
+  'req.headers["Authorization"]',
   'req.headers["cookie"]',
+  'req.headers["Cookie"]',
   'req.headers["x-goog-api-key"]',
+  'req.headers["X-Goog-Api-Key"]',
   'config.geminiApiKeys',
 ];
 
