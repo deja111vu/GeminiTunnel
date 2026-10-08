@@ -9,13 +9,33 @@ import { handleChatCompletion } from './api/openai/chat.js';
 import { handleListModels } from './api/openai/models.js';
 import { handleAdminApi, serveAdminUi } from './api/admin/api.js';
 import { QuotaPoller } from './quota/poller.js';
+import { KeyPool } from './api/gemini/keyPool.js';
+import { KeyClient } from './api/gemini/keyClient.js';
 
 async function main(): Promise<void> {
-  const app = createApp();
   const store = createStore(config.dataDir, config.accountsEncryptionKey);
   const refresher = new TokenRefresher(store, config.accountsEncryptionKey);
   const pool = new AccountPool({ store, refresher, cooldownMs: config.cooldownAfter429Ms });
   const client = new CodeAssistClient();
+
+  // API-key path. Built only when the operator configured at least one
+  // key; otherwise the middleware is skipped and only the OAuth path
+  // is exposed. The keyPool is intentionally also gated on
+  // keyPathEnabled so a half-configured deployment doesn't accidentally
+  // register the middleware.
+  let keyPool: KeyPool | undefined;
+  let keyClient: KeyClient | undefined;
+  if (config.keyPathEnabled) {
+    keyPool = new KeyPool({
+      keys: [...config.geminiApiKeys],
+      cooldownMs: config.keyCooldownAfter429Ms,
+      badTtlMs: config.keyBadTtlMs,
+    });
+    keyClient = new KeyClient();
+    logger.info({ keyCount: config.geminiApiKeys.length }, 'Gemini API key path enabled');
+  }
+
+  const app = createApp({ pool, store, keyPool, keyClient, config });
 
   handleChatCompletion({ app, pool, client, store, config });
   handleListModels({ app });

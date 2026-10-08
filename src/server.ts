@@ -2,6 +2,12 @@ import { Hono } from 'hono';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { timingSafeEqual } from 'node:crypto';
+import { keyOrOAuth } from './api/gemini/middleware.js';
+import type { KeyClient } from './api/gemini/keyClient.js';
+import type { KeyPool } from './api/gemini/keyPool.js';
+import type { AccountPool } from './accounts/pool.js';
+import type { Store } from './accounts/store.js';
+import type { Config } from './config.js';
 
 // 4 MiB. The OpenAI-compatible chat body caps (1 MiB content, 256
 // messages, 64 tools) easily fit; anything above 4 MiB is either
@@ -59,8 +65,26 @@ function requireClientKey(expected: string | undefined): import('hono').Middlewa
   };
 }
 
-export function createApp(): Hono {
+export interface CreateAppDeps {
+  // The OAuth deps remain optional so existing callers (and tests) that
+  // pass nothing continue to work — the proxy can run with neither
+  // path enabled (admin-only / health-only mode).
+  pool?: AccountPool;
+  store?: Store;
+  // The API-key path. When `keyPool` is provided, the middleware is
+  // registered and `/health` exposes the keyPool summary. When both
+  // are present, the keyOrOAuth dispatcher sits between clientAuth
+  // and the OAuth handler.
+  keyPool?: KeyPool;
+  keyClient?: KeyClient;
+  // Optional override for the config (used by tests); defaults to the
+  // module-level singleton.
+  config?: Config;
+}
+
+export function createApp(deps: CreateAppDeps = {}): Hono {
   const app = new Hono();
+  const cfg = deps.config ?? config;
 
   // Edge body cap. Run BEFORE the route handlers so c.req.json() in
   // any POST handler never sees a 200MB payload. /admin/api/login is
@@ -72,8 +96,23 @@ export function createApp(): Hono {
 
   // Optional client auth on the OpenAI surface. The middleware is a
   // no-op when CLIENT_API_KEY is not configured.
-  const clientAuth = requireClientKey(config.clientApiKey);
+  const clientAuth = requireClientKey(cfg.clientApiKey);
   app.use('/v1/*', clientAuth);
+
+  // API-key path dispatcher. Always register when keyPool+keyClient are
+  // present, regardless of `keyPathEnabled`, so `?key=AIza...` and
+  // malformed headers are rejected with 400 instead of falling through.
+  if (deps.keyPool && deps.keyClient) {
+    app.use(
+      '/v1/chat/completions',
+      keyOrOAuth({
+        enabled: cfg.keyPathEnabled,
+        pool: deps.keyPool,
+        client: deps.keyClient,
+        config: cfg,
+      }),
+    );
+  }
 
   app.use('*', async (c, next) => {
     const start = Date.now();
@@ -92,7 +131,21 @@ export function createApp(): Hono {
     );
   });
 
-  app.get('/health', (c) => c.json({ status: 'ok', service: 'gemini-tunnel' }));
+  app.get('/health', (c) => {
+    const upstreams: Record<string, unknown> = {};
+    if (deps.pool) {
+      upstreams.oauth = {
+        accounts: deps.store?.listAccounts().length ?? 0,
+        active: deps.pool.countActive(),
+      };
+    }
+    if (deps.keyPool) {
+      upstreams.apiKey = deps.keyPool.summaryForAllModels();
+    }
+    const body: Record<string, unknown> = { status: 'ok', service: 'gemini-tunnel' };
+    if (Object.keys(upstreams).length > 0) body.upstreams = upstreams;
+    return c.json(body);
+  });
 
   return app;
 }
