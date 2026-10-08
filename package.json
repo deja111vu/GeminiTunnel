@@ -13,7 +13,7 @@
     "build": "tsc && node scripts/copy-static.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "cli": "tsx src/cli/bin.ts"
   },
   "engines": {
