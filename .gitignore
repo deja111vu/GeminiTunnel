@@ -6,3 +6,4 @@ data/
 *.log
 coverage/
 .DS_Store
+review_diff.txt

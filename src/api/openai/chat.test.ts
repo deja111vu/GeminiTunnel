@@ -216,7 +216,9 @@ describe('handleChatCompletion', () => {
         }),
       });
       expect(res.status).toBe(200);
-      expect(res.headers.get('x-gemini-tunnel-account')).toMatch(/.+@e\.com/);
+      // Account email must NOT leak to the client; security review flagged
+      // x-gemini-tunnel-account as sensitive-data-exposure.
+      expect(res.headers.get('x-gemini-tunnel-account')).toBeNull();
       const text = await res.text();
       expect(text).toContain('"object":"chat.completion.chunk"');
       expect(text).toContain('"finish_reason":"stop"');

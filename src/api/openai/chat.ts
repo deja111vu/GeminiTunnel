@@ -3,34 +3,54 @@ import { z } from 'zod';
 import { logger } from '../../logger.js';
 import { CodeAssistClient, HttpError } from '../codeassist/client.js';
 import type { GenerateContentRequest } from '../codeassist/types.js';
-import { toCodeAssistRequest, fromCodeAssistChunk, fromCodeAssistStream } from './converter.js';
+import {
+  toCodeAssistRequest,
+  fromCodeAssistChunk,
+  fromCodeAssistStream,
+  type ChunkMeta,
+} from './converter.js';
 import type { ChatCompletionRequest, ChatCompletionResponse } from './types.js';
 import type { AccountPool } from '../../accounts/pool.js';
 import type { Store } from '../../accounts/store.js';
 import type { Config } from '../../config.js';
 
+// Body-shape caps. Bound at the trust boundary so a single client can't
+// pin memory in the JSON parser, zod validator, or Code Assist request body.
+const MAX_MESSAGES = 256;
+const MAX_CONTENT_CHARS = 1_000_000; // 1 MiB per message; enough for any real prompt
+const MAX_TOOLS = 64;
+
 const ChatBody = z.object({
-  model: z.string().min(1),
-  messages: z.array(
-    z.object({
-      role: z.enum(['system', 'user', 'assistant', 'tool']),
-      content: z.union([z.string(), z.null()]).transform((v) => v ?? ''),
-      name: z.string().optional(),
-      tool_call_id: z.string().optional(),
-    }),
-  ),
+  model: z.string().min(1).max(128),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(['system', 'user', 'assistant', 'tool']),
+        content: z
+          .union([z.string().max(MAX_CONTENT_CHARS), z.null()])
+          .transform((v) => v ?? ''),
+        name: z.string().max(128).optional(),
+        tool_call_id: z.string().max(128).optional(),
+      }),
+    )
+    .max(MAX_MESSAGES),
   stream: z.boolean().optional(),
-  temperature: z.number().optional(),
-  top_p: z.number().optional(),
-  max_tokens: z.number().int().positive().optional(),
-  tools: z.array(z.object({
-    type: z.literal('function'),
-    function: z.object({
-      name: z.string(),
-      description: z.string().optional(),
-      parameters: z.record(z.string(), z.unknown()).optional(),
-    }),
-  })).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  top_p: z.number().min(0).max(1).optional(),
+  max_tokens: z.number().int().positive().max(1_000_000).optional(),
+  tools: z
+    .array(
+      z.object({
+        type: z.literal('function'),
+        function: z.object({
+          name: z.string().max(128),
+          description: z.string().max(MAX_CONTENT_CHARS).optional(),
+          parameters: z.record(z.string(), z.unknown()).optional(),
+        }),
+      }),
+    )
+    .max(MAX_TOOLS)
+    .optional(),
 }) as z.ZodType<ChatCompletionRequest>;
 
 export interface ChatHandlerDeps {
@@ -38,13 +58,14 @@ export interface ChatHandlerDeps {
   pool: AccountPool;
   client: CodeAssistClient;
   store: Store;
-  config: Pick<Config, 'switchBudget' | 'cooldownAfter429Ms'>;
+  // ponytail: only switchBudget is read per request; cooldownAfter429Ms is
+  // consumed at AccountPool construction time, so it's not part of this dep.
+  config: Pick<Config, 'switchBudget'>;
 }
 
-// Handle a 4xx/5xx upstream response by mapping the status to the right
-// AccountPool action. Returns true if the caller should retry with the
-// next account (5xx or transient); false if the error is terminal.
-function handleUpstreamError(
+// Map an upstream HttpError to an AccountPool action + a retry decision.
+// 429/401/403/5xx are recoverable (next account); other 4xx is terminal.
+function classifyUpstreamError(
   err: HttpError,
   accountId: number,
   model: string,
@@ -62,24 +83,8 @@ function handleUpstreamError(
     pool.recordIneligible(accountId, `403: ${err.body.slice(0, 120)}`);
     return 'retry';
   }
-  if (err.status >= 500) {
-    // Don't poison the account on transient upstream errors; just try the next.
-    return 'retry';
-  }
+  if (err.status >= 500) return 'retry';
   return 'fatal';
-}
-
-// Stream upstream chunks through to the client, translating each one. The
-// `signal` is wired to the AbortSignal of the inbound Hono request, so a
-// client disconnect also cancels the upstream fetch.
-async function* streamWithCancel<T>(
-  it: AsyncIterable<T>,
-  signal: AbortSignal,
-): AsyncGenerator<T> {
-  for await (const item of it) {
-    if (signal.aborted) return;
-    yield item;
-  }
 }
 
 function chunkToSse(chunk: unknown): string {
@@ -102,24 +107,26 @@ export function handleChatCompletion({
     const body = parsed.data;
     const model = body.model;
 
-    // Project lookup is best-effort; Code Assist runs without one too.
-    // The project comes from loadCodeAssist() and is cached separately;
-    // for Phase 7 we leave it unset.
+    // Project is best-effort. It comes from loadCodeAssist() and is cached
+    // separately; for Phase 7 we leave it unset.
     const project: string | undefined = undefined;
-    void store; // store is wired for future use (quota attribution, etc.)
+    void store;
 
     const caReq: GenerateContentRequest = toCodeAssistRequest(body, project);
 
-    // Try up to switchBudget accounts. Each attempt is independent: if one
-    // 429s/401s/403s/5xxs we record it and pick the next. The first account
-    // whose stream begins successfully is the one we keep streaming from.
-    let lastFatal: { status: number; body: string } | null = null;
+    // Per-request stable ids so every chunk in a stream shares the same
+    // (id, created) — OpenAI SDKs and many proxies correlate deltas off
+    // these and treat differing values as separate streams.
+    const chunkId = `chatcmpl-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const created = Math.floor(Date.now() / 1000);
+    const meta: ChunkMeta = { id: chunkId, created, isFirst: true };
+
+    let lastFatalStatus: number | null = null;
     for (let attempt = 0; attempt < config.switchBudget; attempt++) {
       let picked: Awaited<ReturnType<AccountPool['pick']>>;
       try {
         picked = await pool.pick();
       } catch (err) {
-        // No eligible account at all.
         logger.warn({ err: (err as Error).message }, 'pool pick failed');
         return c.json({ error: 'no_account_available' }, 503);
       }
@@ -127,21 +134,51 @@ export function handleChatCompletion({
       try {
         const upstream = client.streamGenerateContent(caReq, picked.token, c.req.raw.signal);
         if (body.stream) {
+          // We start streaming immediately so the client sees 200 + chunked
+          // bytes right away. Upstream errors that surface mid-stream are
+          // recorded against the pool and surfaced as a final error chunk
+          // (NOT a status change — the headers are already flushed).
           const sse = new ReadableStream<Uint8Array>({
             async start(controller) {
               const enc = new TextEncoder();
+              let firstChunk = true;
+              let upstreamErr: HttpError | null = null;
               try {
-                for await (const chunk of streamWithCancel(upstream, c.req.raw.signal)) {
-                  const oa = fromCodeAssistChunk(chunk, model);
-                  controller.enqueue(enc.encode(chunkToSse(oa)));
+                for await (const chunk of upstream) {
+                  if (c.req.raw.signal.aborted) break;
+                  const m: ChunkMeta = firstChunk
+                    ? { id: chunkId, created, isFirst: true }
+                    : { id: chunkId, created, isFirst: false };
+                  firstChunk = false;
+                  controller.enqueue(enc.encode(chunkToSse(fromCodeAssistChunk(chunk, model, m))));
                 }
                 controller.enqueue(enc.encode('data: [DONE]\n\n'));
               } catch (err) {
+                if (err instanceof HttpError) upstreamErr = err;
                 logger.warn(
                   { err: (err as Error).message, account: picked.email },
                   'stream interrupted',
                 );
               } finally {
+                if (upstreamErr) {
+                  // Surface the error to the pool AFTER the stream is done
+                  // so the next pick sees the new state.
+                  classifyUpstreamError(upstreamErr, picked.accountId, model, pool);
+                  // Best-effort error chunk for the client (we can't change
+                  // status now; chunked encoding has already started).
+                  controller.enqueue(
+                    enc.encode(
+                      chunkToSse({
+                        id: chunkId,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [],
+                        error: { code: upstreamErr.status, message: 'upstream_error' },
+                      }),
+                    ),
+                  );
+                }
                 controller.close();
               }
             },
@@ -152,24 +189,26 @@ export function handleChatCompletion({
               'Content-Type': 'text/event-stream',
               'Cache-Control': 'no-cache',
               Connection: 'keep-alive',
-              'x-gemini-tunnel-account': picked.email,
             },
           });
         }
         // stream=false: drain to JSON.
-        const response: ChatCompletionResponse = await fromCodeAssistStream(upstream, model);
-        return c.json(response, 200, { 'x-gemini-tunnel-account': picked.email });
+        const response: ChatCompletionResponse = await fromCodeAssistStream(
+          upstream,
+          model,
+          chunkId,
+          created,
+        );
+        return c.json(response, 200);
       } catch (err) {
         if (err instanceof HttpError) {
-          const action = handleUpstreamError(err, picked.accountId, model, pool);
+          const action = classifyUpstreamError(err, picked.accountId, model, pool);
           if (action === 'fatal') {
-            lastFatal = { status: err.status, body: err.body };
+            lastFatalStatus = err.status;
             break;
           }
-          // 4xx mapped action + 5xx: try the next account.
           continue;
         }
-        // Network / abort / unknown: don't poison the account; try next.
         logger.warn(
           { err: (err as Error).message, account: picked.email },
           'upstream call failed without status',
@@ -177,9 +216,10 @@ export function handleChatCompletion({
         continue;
       }
     }
+    // budget exhausted. Don't leak the upstream body; just signal the category.
     return c.json(
-      { error: 'upstream_exhausted', last: lastFatal },
-      (lastFatal ? lastFatal.status : 500) as 500,
+      { error: 'upstream_exhausted', retriable: lastFatalStatus == null },
+      { status: (lastFatalStatus ?? 500) as 400 | 401 | 403 | 404 | 500 },
     );
   });
 }
