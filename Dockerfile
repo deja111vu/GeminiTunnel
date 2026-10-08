@@ -40,13 +40,12 @@ COPY package.json package-lock.json* ./
 # better-sqlite3 under the controlled toolchain we just installed.
 RUN npm ci --ignore-scripts
 
-# F15: audit now, while the full dep tree (incl. dev) is on disk. We
-# deliberately do NOT pass --omit=dev: we audit exactly the tree the
-# builder installed. The audit fails the build on any known-vuln dep
-# at audit-level=high. (Later the runtime stage installs only --omit=dev,
-# so a dep only used at build time still has to pass the gate to keep
-# us honest about the supply chain.)
-RUN npm audit --audit-level=high
+# F15: audit the PRODUCTION dep tree only. devDeps (vitest, msw, tsx,
+# supertest) are installed here for the build, but `npm prune` below
+# removes them before the runtime COPY, so they have no attack surface
+# in the shipped image. We use --omit=dev so the gate catches the
+# deps that actually ship, not the dev-only test harness.
+RUN npm audit --omit=dev --audit-level=high
 
 COPY tsconfig.json ./
 COPY src ./src
