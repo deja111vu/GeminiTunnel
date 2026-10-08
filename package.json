@@ -1,0 +1,44 @@
+{
+  "name": "gemini-tunnel",
+  "version": "2.0.0",
+  "description": "OpenAI-compatible multi-account OAuth proxy for Google Code Assist API",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "tunnel": "dist/cli/bin.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc && node scripts/copy-static.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "cli": "tsx src/cli/bin.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.4",
+    "better-sqlite3": "^11.5.0",
+    "google-auth-library": "^9.15.0",
+    "hono": "^4.6.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "@types/supertest": "^6.0.2",
+    "msw": "^2.6.0",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

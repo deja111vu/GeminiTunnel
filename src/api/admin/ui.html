@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gemini-tunnel admin</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #0f1115; color: #e8eaed; min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 1rem;
+    padding: 1rem 1.5rem; border-bottom: 1px solid #2a2d34;
+  }
+  header h1 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header input { width: 360px; }
+  nav { display: flex; gap: 0.5rem; padding: 0.5rem 1.5rem; border-bottom: 1px solid #2a2d34; }
+  nav button {
+    background: transparent; color: #9aa0a6; border: none; padding: 0.5rem 0.75rem;
+    border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  nav button.active { background: #2a2d34; color: #e8eaed; }
+  nav button:hover { color: #e8eaed; }
+  main { padding: 1.5rem; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #2a2d34; }
+  th { color: #9aa0a6; font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  td .pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+  .pill.active { background: #1b3a23; color: #6fdc8c; }
+  .pill.invalid { background: #3a1b1b; color: #dc6f6f; }
+  .pill.ineligible { background: #3a2e1b; color: #dca96f; }
+  button.act {
+    background: #2a2d34; color: #e8eaed; border: 1px solid #3a3d44; padding: 4px 10px;
+    border-radius: 4px; cursor: pointer; font: inherit;
+  }
+  button.act:hover { background: #3a3d44; }
+  button.act.danger { color: #dc6f6f; border-color: #5a2a2a; }
+  input, select {
+    background: #1a1d23; color: #e8eaed; border: 1px solid #2a2d34;
+    padding: 6px 10px; border-radius: 4px; font: inherit;
+  }
+  .empty { color: #6a6e76; padding: 2rem 0; text-align: center; }
+  .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: #2a2d34; padding: 0.75rem 1rem; border-radius: 6px; max-width: 400px; }
+  .toast.error { background: #5a2a2a; color: #fce8e8; }
+  code { background: #1a1d23; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+  pre { background: #1a1d23; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>gemini-tunnel admin</h1>
+  <span class="spacer"></span>
+  <input id="token" type="password" placeholder="paste admin token (hex64)" autocomplete="off">
+  <button class="act" id="save-token">Sign in</button>
+</header>
+<nav>
+  <button data-tab="accounts" class="active">Accounts</button>
+  <button data-tab="quota">Quota</button>
+  <button data-tab="logs">Logs</button>
+</nav>
+<main>
+  <section id="panel-accounts" class="panel active">
+    <p>
+      <button class="act" id="add-account">+ Add account</button>
+    </p>
+    <div id="accounts-table"><div class="empty">loading…</div></div>
+  </section>
+  <section id="panel-quota" class="panel">
+    <select id="quota-account"><option>loading…</option></select>
+    <div id="quota-data" style="margin-top:1rem"></div>
+  </section>
+  <section id="panel-logs" class="panel">
+    <p>Logs are emitted as structured JSON to stdout. Tail them with:</p>
+    <pre>docker logs -f &lt;container&gt; 2&gt;&amp;1 | npx pino-pretty</pre>
+    <p>Or, when running directly: stdout of the <code>npm start</code> process.</p>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+// F18: the admin token never lives in localStorage. The user pastes it
+// once on this page; we POST it to /admin/api/login which sets an
+// HttpOnly+Secure+SameSite=Strict cookie. After that, every request
+// authenticates via the cookie (auto-sent) and JS can't read it, so
+// an XSS payload can't walk out with the admin token. Bearer-header
+// auth is also still accepted for curl scripts, but the SPA doesn't
+// use it.
+function authHeaders() {
+  return { 'content-type': 'application/json' };
+}
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) }, credentials: 'same-origin' });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    if (res.status === 401 && !path.endsWith('/login')) {
+      // Session expired or never set. Prompt the user to log in again.
+      toast('session expired — sign in', true);
+      $('#token').focus();
+    }
+    throw new Error(`${res.status}: ${body.slice(0, 200)}`);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+function toast(msg, isErr = false) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.className = 'toast' + (isErr ? ' error' : '');
+  setTimeout(() => { el.textContent = ''; el.className = ''; }, 4000);
+}
+function fmtTime(t) {
+  if (!t) return '—';
+  return new Date(t).toLocaleString();
+}
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Tabs
+document.querySelectorAll('nav button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('#panel-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'quota') loadQuota();
+  });
+});
+$('#save-token').addEventListener('click', async () => {
+  const t = $('#token').value.trim();
+  if (!t) { toast('enter the admin token first', true); return; }
+  // Clear the in-memory input BEFORE the await so the token doesn't
+  // sit in the DOM during the network round-trip. An XSS that fires
+  // while we're awaiting would otherwise read the raw token and defeat
+  // the HttpOnly cookie we're about to set.
+  $('#token').value = '';
+  try {
+    await api('/admin/api/login', { method: 'POST', body: JSON.stringify({ token: t }) });
+    toast('signed in');
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
+});
+// Allow Enter in the token field to submit.
+$('#token').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#save-token').click();
+});
+
+// Accounts
+async function loadAccounts() {
+  try {
+    const list = await api('/admin/api/accounts');
+    if (!list.length) {
+      $('#accounts-table').innerHTML = '<div class="empty">no accounts yet — click "+ Add account"</div>';
+      return;
+    }
+    const rows = list.map((a) => `
+      <tr>
+        <td>${escapeHtml(a.id)}</td>
+        <td>${escapeHtml(a.email)}</td>
+        <td><span class="pill ${escapeHtml(a.status)}">${escapeHtml(a.status)}</span></td>
+        <td>${escapeHtml(a.tierName || a.tierId || '—')}</td>
+        <td>${a.cooldownUntil ? 'until ' + fmtTime(a.cooldownUntil) : '—'}</td>
+        <td>${fmtTime(a.lastUsedAt)}</td>
+        <td>
+          <button class="act" data-act="refresh" data-id="${a.id}">refresh</button>
+          <button class="act danger" data-act="remove" data-id="${a.id}">remove</button>
+        </td>
+      </tr>
+    `).join('');
+    $('#accounts-table').innerHTML = `<table>
+      <thead><tr><th>id</th><th>email</th><th>status</th><th>tier</th><th>cooldown</th><th>last used</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+    // Quota selector
+    $('#quota-account').innerHTML = list
+      .map((a) => `<option value="${a.id}">${escapeHtml(a.email)}</option>`)
+      .join('');
+    // Wire actions
+    $('#accounts-table').querySelectorAll('button[data-act]').forEach((b) => {
+      b.addEventListener('click', () => handleAccountAction(b.dataset.act, b.dataset.id));
+    });
+  } catch (e) { toast(e.message, true); }
+}
+async function handleAccountAction(act, id) {
+  try {
+    if (act === 'refresh') {
+      await api('/admin/api/accounts/' + id + '/refresh', { method: 'POST' });
+      toast('refreshed');
+    } else if (act === 'remove') {
+      if (!confirm('Remove account #' + id + '?')) return;
+      await api('/admin/api/accounts/' + id, { method: 'DELETE' });
+      toast('removed');
+    }
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
+}
+$('#add-account').addEventListener('click', async () => {
+  const label = prompt('Account label (e.g. "work")?');
+  if (!label) return;
+  try {
+    const { url, state } = await api('/admin/api/oauth/start', {
+      method: 'POST',
+      body: JSON.stringify({ accountLabel: label }),
+    });
+    // Best-effort clipboard copy so the user can paste the URL straight
+    // into a browser. We only tell the user it succeeded if it actually
+    // did, otherwise the prompt becomes a lie on non-HTTPS contexts
+    // where the API is blocked.
+    let clipboardOk = false;
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(url);
+        clipboardOk = true;
+      } catch {
+        // permission denied / insecure context — fall through
+      }
+    }
+    prompt(
+      clipboardOk
+        ? 'Open this URL in your browser (also copied to clipboard), then paste the code from the callback URL.'
+        : 'Open this URL in your browser, then paste the code from the callback URL.',
+      url,
+    );
+    const code = prompt('Paste the code (the `code=...` parameter from the redirect URL):');
+    if (!code) return;
+    const out = await api('/admin/api/oauth/exchange', {
+      method: 'POST',
+      body: JSON.stringify({ state, code }),
+    });
+    toast('added ' + out.email);
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
+});
+
+// Quota
+async function loadQuota() {
+  const id = $('#quota-account').value;
+  if (!id) return;
+  try {
+    const data = await api('/admin/api/accounts/' + id + '/quota');
+    const snapRows = (data.snapshots || []).map((s) => `
+      <tr>
+        <td>${escapeHtml(s.model)}</td>
+        <td>${s.remaining} / ${s.limitTotal}</td>
+        <td>${s.resetAt ? fmtTime(s.resetAt) : '—'}</td>
+        <td>${fmtTime(s.fetchedAt)}</td>
+      </tr>
+    `).join('') || '<tr><td colspan="4" class="empty">no snapshots</td></tr>';
+    const eventRows = (data.events || []).map((e) => `
+      <tr>
+        <td>${fmtTime(e.createdAt)}</td>
+        <td>${escapeHtml(e.model)}</td>
+        <td>${escapeHtml(e.source)}</td>
+        <td>${e.resetAt ? fmtTime(e.resetAt) : '—'}</td>
+      </tr>
+    `).join('') || '<tr><td colspan="4" class="empty">no events</td></tr>';
+    $('#quota-data').innerHTML = `
+      <h3>Latest snapshots</h3>
+      <table><thead><tr><th>model</th><th>remaining / total</th><th>resets</th><th>fetched</th></tr></thead><tbody>${snapRows}</tbody></table>
+      <h3 style="margin-top:1.5rem">Recent events (7d)</h3>
+      <table><thead><tr><th>time</th><th>model</th><th>source</th><th>reset</th></tr></thead><tbody>${eventRows}</tbody></table>
+    `;
+  } catch (e) { toast(e.message, true); }
+}
+$('#quota-account').addEventListener('change', loadQuota);
+
+loadAccounts();
+</script>
+</body>
+</html>

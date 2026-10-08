@@ -1,9 +1,15 @@
-.env
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-.idea/
-.vscode/
+node_modules/
+dist/
+# Block ALL .env variants (.env.production, .env.staging, etc.) by default;
+# explicitly allow the example file so the doc stays in the repo.
+.env*
+!.env.example
+data/
 *.log
+coverage/
+.DS_Store
+review_diff.txt
+# Internal planning / spec artifacts (superpowers workflow). Not user-
+# facing documentation; keeps the public repo focused on the shipped
+# product. The shipped docs are README.md + CHANGELOG.md + LICENSE.
+docs/
