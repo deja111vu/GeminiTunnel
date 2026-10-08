@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Hono } from 'hono';
 import { handleApiKeyChat } from './keyChat.js';
 import { KeyPool } from './keyPool.js';
@@ -174,12 +174,11 @@ describe('handleApiKeyChat', () => {
     expect(summary.bad).toBe(1);
   });
 
-  it('404 → switch (not fail-fast)', async () => {
+  it('404 → fatal (model unknown to Google, switching keys won\'t help)', async () => {
     let i = 0;
     const fakeFetch: typeof fetch = async () => {
-      const r = i++;
-      if (r === 0) return new Response('not found', { status: 404 });
-      return makeSseResponse(['data: {"id":"1"}', 'data: [DONE]']);
+      i++;
+      return new Response('not found', { status: 404 });
     };
     const app = makeApp(makePool([K1, K2]), fakeFetch);
     const res = await app.request('/v1/chat/completions', {
@@ -187,7 +186,71 @@ describe('handleApiKeyChat', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [{ role: 'user', content: 'hi' }], stream: true }),
     });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('upstream_exhausted');
+  });
+
+  it('403 → markBad + retry (symmetry with 401)', async () => {
+    let i = 0;
+    const fakeFetch: typeof fetch = async () => {
+      const r = i++;
+      if (r === 0) return new Response('forbidden', { status: 403 });
+      return makeSseResponse(['data: {"id":"1"}', 'data: [DONE]']);
+    };
+    const pool = makePool([K1, K2]);
+    const app = makeApp(pool, fakeFetch);
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    });
     expect(res.status).toBe(200);
+    expect(pool.summaryForAllModels().bad).toBe(1);
+  });
+
+  it('budget=1: single 429 → upstream_exhausted, no second attempt', async () => {
+    let calls = 0;
+    const fakeFetch: typeof fetch = async () => {
+      calls++;
+      return new Response('rate limited', { status: 429 });
+    };
+    const app = makeApp(makePool([K1, K2]), fakeFetch, 1);
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    });
+    // budget=1 → after the 1st 429 there are no more attempts; no fatal
+    // status was recorded (429 is retry, not fatal), so the fallback
+    // 502 Bad Gateway fires.
+    expect(res.status).toBe(502);
+    expect(calls).toBe(1);
+    const body = (await res.json()) as { error: string; retriable: boolean };
+    expect(body.error).toBe('upstream_exhausted');
+    expect(body.retriable).toBe(true);
+  });
+
+  it('streaming success calls clearCooldown for the chosen key (spy)', async () => {
+    // Spy on clearCooldown to verify the handler triggers it after the
+    // first SSE chunk — this is the contract that keeps the round-robin
+    // from biasing away from a key just because it hit a 429 on an
+    // earlier request.
+    const fakeFetch: typeof fetch = async () =>
+      makeSseResponse(['data: {"id":"1"}', 'data: [DONE]']);
+    const pool = makePool([K1, K2]);
+    const spy = vi.spyOn(pool, 'clearCooldown');
+    const app = makeApp(pool, fakeFetch);
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [key, model] = spy.mock.calls[0];
+    expect([K1, K2]).toContain(key);
+    expect(model).toBe('gemini-2.5-pro');
   });
 
   it('all keys in cooldown (not bad) → 503 with Retry-After=ceil(min cooldown)', async () => {
@@ -225,18 +288,23 @@ describe('handleApiKeyChat', () => {
     expect(res.headers.get('retry-after')).toBe('5');
   });
 
-  it('client abort mid-stream → upstream fetch aborted, no exception', async () => {
-    // Use a real AbortController; abort it after first chunk but before [DONE].
+  it('client abort mid-stream → upstream reader cancelled', async () => {
+    // Build a stream that holds open so the client can cancel. The
+    // Hono response body's cancel() must propagate to the upstream
+    // ReadableStream cancel() so the socket is released.
     let upstreamCancelled = false;
+    let abortObserved = false;
     const fakeFetch: typeof fetch = async (_url, init) => {
-      const signal = init?.signal;
-      signal?.addEventListener('abort', () => { upstreamCancelled = true; });
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           controller.enqueue(new TextEncoder().encode('data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}\n\n'));
-          await new Promise((r) => setTimeout(r, 50));
-          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-          controller.close();
+          // Hold the stream open until aborted.
+          await new Promise<void>((resolve) => {
+            const onAbort = () => { abortObserved = true; resolve(); };
+            init?.signal?.addEventListener('abort', onAbort);
+            setTimeout(resolve, 5_000);
+          });
+          try { controller.close(); } catch { /* already closed */ }
         },
         cancel() { upstreamCancelled = true; },
       });
@@ -250,9 +318,23 @@ describe('handleApiKeyChat', () => {
       body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [{ role: 'user', content: 'hi' }], stream: true }),
       signal: ac.signal,
     });
+    // Wait for F6 first-chunk + start() to begin pumping.
+    await new Promise((r) => setTimeout(r, 100));
     ac.abort();
     const res = await promise;
-    expect(res.status).toBe(200);
-    expect(typeof upstreamCancelled).toBe('boolean');
+    // Drain the response body so cancel propagates upstream.
+    try { await res.text(); } catch { /* aborted */ }
+    // The chain: ac.abort() → fetch signal aborts → keyClient.streamChat
+    // generator returns (via it.return) → our sse.cancel() awaits
+    // it.return → upstream reader.cancel(). Allow up to 1s.
+    for (let i = 0; i < 50 && !upstreamCancelled; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // At minimum the fetch must have observed the abort. If the upstream
+    // cancel chain didn't propagate, that's still a real bug, but flag
+    // it explicitly so the test is useful even when the timer race bites.
+    expect(abortObserved).toBe(true);
+    // Best-effort: full chain.
+    expect(upstreamCancelled).toBe(true);
   });
 });

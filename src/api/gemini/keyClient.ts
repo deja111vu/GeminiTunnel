@@ -45,6 +45,16 @@ export interface KeyClientOptions {
   timeoutMs?: number;
 }
 
+// Thrown when the upstream claims success (200) but the response shape
+// doesn't match what we asked for — e.g. we asked for SSE and got
+// application/json. Independent of the API key, so callers should not
+// punish the key pool for it.
+export class UpstreamMisconfiguredError extends Error {
+  constructor(detail: string) {
+    super(`upstream_misconfigured: ${detail}`);
+  }
+}
+
 export class KeyClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -92,16 +102,30 @@ export class KeyClient {
     const ct = res.headers.get('content-type') ?? '';
     if (!ct.includes('text/event-stream')) {
       const text = await readBodyCapped(res, 64 * 1024);
-      throw new Error(`upstream_misconfigured: expected text/event-stream, got ${ct}: ${text.slice(0, 200)}`);
+      throw new UpstreamMisconfiguredError(`expected text/event-stream, got ${ct}: ${text.slice(0, 200)}`);
     }
     const reader = res.body.getReader();
+    // signal listener that breaks the read loop and releases the socket.
+    // Without this, a downstream `it.return()` can't interrupt the
+    // in-flight `reader.read()` (it's an await, not a yield), and the
+    // upstream holds open until the timeout fires.
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      void reader.cancel().catch(() => {});
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
     try {
       while (true) {
+        if (aborted) return;
         const { value, done } = await reader.read();
+        if (aborted) return;
         if (value) yield value;
         if (done) return;
       }
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       await reader.cancel().catch(() => {});
     }
   }

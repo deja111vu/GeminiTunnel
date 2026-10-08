@@ -9,7 +9,7 @@ import type { Hono, Context } from 'hono';
 import { z } from 'zod';
 import { logger } from '../../logger.js';
 import { HttpError } from '../codeassist/client.js';
-import { KeyClient } from './keyClient.js';
+import { KeyClient, UpstreamMisconfiguredError } from './keyClient.js';
 import type { KeyPool } from './keyPool.js';
 import type { Config } from '../../config.js';
 
@@ -63,19 +63,15 @@ function classifyKeyError(err: HttpError, key: string, model: string, pool: KeyP
     pool.markBad(key);
     return 'retry';
   }
-  if (err.status >= 500 || err.status === 404) return 'retry';
+  // 5xx is transient infra (Google side). 404 is fatal: model unknown to
+  // Google's backend, switching keys won't change the answer.
+  if (err.status >= 500) return 'retry';
   return 'fatal';
 }
 
 function retryAfterSeconds(ms: number | null, fallbackMs: number): number {
   const v = ms && ms > 0 ? ms : fallbackMs;
   return Math.max(1, Math.ceil(v / 1000));
-}
-
-// Upstream-misconfigured (e.g. content-type mismatch) is a server-side
-// problem, not a key failure. Don't punish the pool.
-function firstFailedNonHttpError(err: unknown): boolean {
-  return err instanceof Error && /upstream_misconfigured/.test(err.message);
 }
 
 // Pure handler. Used by both handleApiKeyChat (route registration) and
@@ -97,8 +93,8 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
     } catch {
       // NoKeyAvailableError: pool knows whether it's all_bad or all_cooldown.
       // For Retry-After, prefer the actual time-to-expiry of whichever
-      // class is blocking; fall back to the configured TTL only when the
-      // pool has no signal (empty pool / unknown).
+      // class is blocking. Fall back to 60s — not keyBadTtlMs (24h) — when
+      // the pool has no signal; an empty pool is not a 24h outage.
       const badMs = pool.minBadExpiry();
       const coolMs = pool.minCooldownExpiry(model);
       const retryMs = badMs ?? coolMs;
@@ -106,7 +102,7 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
         { error: 'all_keys_unavailable' },
         {
           status: 503,
-          headers: { 'Retry-After': String(retryAfterSeconds(retryMs, config.keyBadTtlMs)) },
+          headers: { 'Retry-After': String(retryAfterSeconds(retryMs, 60_000)) },
         },
       );
     }
@@ -125,10 +121,8 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
             if (action === 'fatal') { lastFatalStatus = err.status; break; }
             continue;
           }
-          // Non-HttpError (e.g. content-type mismatch → "upstream_misconfigured")
-          // is the upstream's fault, not a key failure: don't poison the pool,
-          // and surface a 502 (upstream gave us something we can't use).
-          if (firstFailedNonHttpError(err)) {
+          if (err instanceof UpstreamMisconfiguredError) {
+            // Upstream gave us something we can't use; not a key failure.
             lastFatalStatus = 502;
             break;
           }
@@ -139,16 +133,35 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
           lastFatalStatus = 502;
           break;
         }
+        // First chunk delivered = key is healthy for this model.
+        pool.clearCooldown(picked.key, model);
+        // Abort plumbing: if the client aborts, Hono doesn't auto-cancel
+        // the response body. We listen on the request signal and trigger
+        // an explicit return on the upstream generator, which propagates
+        // to keyClient.streamChat's finally → reader.cancel() → socket
+        // release. Without this, the upstream holds open until timeout.
+        const onAbort = () => { void it.return?.(); };
+        if (c.req.raw.signal.aborted) onAbort();
+        else c.req.raw.signal.addEventListener('abort', onAbort, { once: true });
         const sse = new ReadableStream<Uint8Array>({
           async start(controller) {
-            controller.enqueue(first.value);
+            const safeEnqueue = (chunk: Uint8Array): boolean => {
+              try {
+                controller.enqueue(chunk);
+                return true;
+              } catch {
+                // Controller closed (consumer cancelled mid-flight). Stop pumping.
+                return false;
+              }
+            };
+            if (!safeEnqueue(first.value)) return;
             let upstreamErr: HttpError | null = null;
             try {
               while (true) {
                 if (c.req.raw.signal.aborted) break;
                 const next = await it.next();
                 if (next.done) break;
-                controller.enqueue(next.value);
+                if (!safeEnqueue(next.value)) break;
               }
             } catch (err) {
               if (err instanceof HttpError) upstreamErr = err;
@@ -160,10 +173,11 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
               if (upstreamErr) {
                 classifyKeyError(upstreamErr, picked.key, model, pool);
               }
-              controller.close();
+              try { controller.close(); } catch { /* already closed */ }
             }
           },
           async cancel() {
+            c.req.raw.signal.removeEventListener('abort', onAbort);
             // AsyncGenerator.return() is async; await it so the upstream
             // socket is released before cancel() resolves.
             await it.return?.();
@@ -198,13 +212,13 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
       continue;
     }
   }
-  // Budget exhausted. lastFatalStatus can be 4xx or 5xx; pass through.
+  // Budget exhausted. lastFatalStatus can be any 4xx/5xx; pass through.
   // null = network/connection failure across all keys → 502 Bad Gateway.
   const status: number = lastFatalStatus ?? 502;
-  return c.json(
-    { error: 'upstream_exhausted', retriable: lastFatalStatus == null },
-    { status: status as 400 | 401 | 403 | 404 | 429 | 500 | 502 | 503 },
-  );
+  // retriable for null (network) and 5xx; client should retry; 4xx fatal
+  // means the request shape is wrong, retrying with the same body won't help.
+  const retriable = lastFatalStatus == null || (lastFatalStatus >= 500 && lastFatalStatus < 600);
+  return c.json({ error: 'upstream_exhausted', retriable }, status);
 }
 
 export interface KeyChatRouteDeps extends KeyChatDeps {
