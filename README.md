@@ -21,10 +21,13 @@ OpenAI-совместимый прокси для **Google Code Assist / Gemini 
 - 📊 **Квоты и события** — фоновое опрашивание `/retrieveUserQuota`
   каждые 5 минут, история 429 на 7 дней, просмотр через Web UI.
 - 🖥️ **Web UI на `/admin`** — список аккаунтов, квоты, статус, ручной
-  refresh, удаление, запуск нового OAuth-логина. Защищён bearer-токеном.
+  refresh, удаление, запуск нового OAuth-логина. Авторизация через
+  HttpOnly+Secure+SameSite=Strict cookie; Bearer-токен остался для
+  curl-скриптов и тестов.
 - 🛠️ **CLI `tunnel`** — то же самое из терминала: `login`, `list`,
   `remove`, `refresh`, `quota`. Удобно для SSH на VPS.
-- 🐳 **Docker-ready** — один контейнер, том для БД, healthcheck.
+- 🐳 **Docker-ready** — один контейнер, том для БД, healthcheck,
+  digest-pinned base image, `npm audit` на build, CycloneDX SBOM.
 - 🪶 **Зависимости** — Node 22, `better-sqlite3`, `hono`, `pino`,
   `google-auth-library`. Никаких внешних сервисов.
 
@@ -159,24 +162,49 @@ Settings → Models → OpenAI API Key:
 1. **`ACCOUNTS_ENCRYPTION_KEY`** — самое важное. Потеряли = потеряли
    все аккаунты, придётся перелогинивать. Храните в секрет-менеджере
    (1Password, Vault, AWS Secrets Manager), **не в git**.
-2. **`ADMIN_TOKEN`** — bearer-токен для `/admin` и `/admin/api/*`.
-   Проверяется через `crypto.timingSafeEqual`, а не `===`.
-3. **`/admin` сам по себе — не панель без пароля.** Без `ADMIN_TOKEN`
-   отдаёт 401. UI использует его для запросов.
+2. **`ADMIN_TOKEN`** — токен для `/admin` и `/admin/api/*`.
+   Проверяется через `crypto.timingSafeEqual`, а не `===`. UI
+   передаёт его через HttpOnly+Secure+SameSite=Strict cookie
+   (XSS не может прочитать), Bearer-заголовок остался для curl и
+   тестов.
+3. **`/admin` сам по себе — не панель без пароля.** Без валидной
+   сессии отдаёт 401 + `WWW-Authenticate`. UI не хранит токен в
+   `localStorage`.
 4. **UFW / iptables** — ограничьте 8000-й порт по IP. Cloudflare
    Tunnel — хороший способ спрятать origin.
 5. **HTTPS** — обязателен, если клиент не в локальной сети. Самый
    простой путь: поставить прокси за Cloudflare Tunnel или Caddy.
+   Cookie-флаги (`Secure`) рассчитаны на это.
 6. **Refresh-token rotation** — Google при каждом refresh может
    выдать новый `refresh_token`; прокси записывает его обратно
-   в БД атомарно с новым access-токеном.
+   в БД атомарно с новым access-токеном через `db.transaction()`,
+   чтобы SIGKILL между записями не оставил пару «новый access +
+   старый refresh» (невалидный на следующем refresh).
 7. **OAuth state TTL** — pending-флоу хранятся 10 минут, и не более
    1000 одновременно (защита от DoS).
 8. **Quota polling — read-only** — QuotaPoller использует только
    `loadCodeAssist` и `retrieveUserQuota`, ничего не пишет в аккаунт.
-9. **Файловые права** — на Linux `data/` создаётся 0o700, `*.db` —
-   0o600. На Windows — наследуются от пользователя, запустившего
-   контейнер.
+9. **Файловые права** — на Linux `data/` создаётся 0o700, `*.db`,
+   `*.db-wal`, `*.db-shm` — 0o600 (sidecars пере-chmod-ятся после
+   каждого checkpoint). На Windows — наследуются от пользователя,
+   запустившего контейнер.
+10. **Body cap** — все POST (`/v1/*` и `/admin/api/*`) ограничены
+    4 МиБ; без `Content-Length` на POST — 411; сверх лимита — 413.
+    Проверка отрабатывает до `c.req.json()`, чтобы 200 МБ тело не
+    попало в V8.
+11. **Логи безопасно redact-ятся** — pino вырезает
+    `*.access_token`, `*.refresh_token`, `*.authorization`,
+    `*.cookie`, `adminToken`, `accountsEncryptionKey`,
+    `googleOauthClientSecret` и вложенные `req.headers.*`.
+12. **WAL durability** — SQLite в режиме WAL с `secure_delete = ON`
+    (zeroes freed pages), `wal_checkpoint(TRUNCATE)` +
+    re-chmod sidecars на SIGINT/SIGTERM. Никаких страниц с
+    access-токенами, оставшихся на диске после штатной остановки.
+13. **Docker-образ** — базовый image прибит по digest, `npm ci
+    --ignore-scripts` (только `better-sqlite3` rebuild из source
+    под контролируемым toolchain), devDeps вычищаются до копирования
+    в runtime-стадию, `npm audit --audit-level=high` валит сборку
+    на известной CVE, source maps не попадают в dist.
 
 ## 🩺 Troubleshooting
 
@@ -250,24 +278,34 @@ GeminiTunnel/
 │   ├── api/
 │   │   ├── openai/         # OpenAI-совместимый адаптер (/v1/chat, /v1/models)
 │   │   ├── codeassist/     # Клиент Code Assist (streamGenerateContent, quota)
-│   │   └── admin/          # /admin API + Web UI
+│   │   └── admin/          # /admin API + Web UI (cookie auth)
 │   ├── accounts/           # SQLite store, encryption, TokenRefresher, AccountPool
 │   ├── oauth/              # PKCE, state, finalize
 │   ├── quota/              # QuotaPoller
 │   ├── cli/bin.ts          # `tunnel` CLI
 │   ├── config.ts           # zod-валидация env
-│   ├── index.ts            # server entry point
-│   └── server.ts           # Hono app + /health
+│   ├── index.ts            # server entry point + graceful shutdown
+│   ├── logger.ts           # pino + redact
+│   └── server.ts           # Hono app + body cap + /health
 ├── test/integration/       # end-to-end тесты с mock upstream
-├── scripts/copy-static.mjs # post-build: ui.html -> dist/
-├── Dockerfile              # multi-stage Node 22
+├── scripts/copy-static.mjs # post-build: ui.html -> dist/, .js.map strip
+├── Dockerfile              # multi-stage Node 22, digest-pinned
 ├── docker-compose.yml
 ├── .env.example
-├── tsconfig.json           # build (rootDir=src)
+├── tsconfig.json           # build (rootDir=src, sourceMap: false)
 ├── tsconfig.test.json      # typecheck для test/
-└── package.json
+├── vitest.config.ts
+├── CHANGELOG.md            # история релизов (Keep a Changelog)
+├── README.md
+└── LICENSE
 ```
 
 ## 📄 Лицензия
 
 [MIT](LICENSE)
+
+## 🗒 История изменений
+
+[CHANGELOG.md](CHANGELOG.md) — что добавилось, что изменилось,
+что удалилось в каждом релизе. Теги релизов и GitHub Releases
+публикуются на странице репозитория.

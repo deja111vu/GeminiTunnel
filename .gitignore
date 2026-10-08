@@ -9,3 +9,7 @@ data/
 coverage/
 .DS_Store
 review_diff.txt
+# Internal planning / spec artifacts (superpowers workflow). Not user-
+# facing documentation; keeps the public repo focused on the shipped
+# product. The shipped docs are README.md + CHANGELOG.md + LICENSE.
+docs/
