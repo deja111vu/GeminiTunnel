@@ -189,9 +189,24 @@ $('#add-account').addEventListener('click', async () => {
       body: JSON.stringify({ accountLabel: label }),
     });
     // Best-effort clipboard copy so the user can paste the URL straight
-    // into a browser. Silently no-ops on browsers that block the API.
-    navigator.clipboard?.writeText(url).catch(() => {});
-    prompt('Open this URL in your browser (also copied to clipboard), then paste the code from the callback URL.', url);
+    // into a browser. We only tell the user it succeeded if it actually
+    // did, otherwise the prompt becomes a lie on non-HTTPS contexts
+    // where the API is blocked.
+    let clipboardOk = false;
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(url);
+        clipboardOk = true;
+      } catch {
+        // permission denied / insecure context — fall through
+      }
+    }
+    prompt(
+      clipboardOk
+        ? 'Open this URL in your browser (also copied to clipboard), then paste the code from the callback URL.'
+        : 'Open this URL in your browser, then paste the code from the callback URL.',
+      url,
+    );
     const code = prompt('Paste the code (the `code=...` parameter from the redirect URL):');
     if (!code) return;
     const out = await api('/admin/api/oauth/exchange', {

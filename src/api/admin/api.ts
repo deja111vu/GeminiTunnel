@@ -119,10 +119,16 @@ export function handleAdminApi({
       // Log the upstream error server-side; never echo it (could include
       // user-controlled state or upstream Google error text). Map typed
       // errors to status codes without surfacing the raw message.
-      const kind = err instanceof FinalizeError ? err.kind : 'upstream';
-      const status = kind === 'unknown_state' ? 400 : 502;
-      logger.warn({ kind, err: (err as Error).message }, 'admin: oauth/exchange failed');
-      return c.json({ error: 'exchange_failed' }, status);
+      // Untyped exceptions are treated as server bugs (500), not as
+      // upstream failures (502), so monitoring pages don't chase Google
+      // for local regressions like DB corruption or cipher failures.
+      if (err instanceof FinalizeError) {
+        const status = err.kind === 'unknown_state' ? 400 : 502;
+        logger.warn({ kind: err.kind, err: err.message }, 'admin: oauth/exchange failed');
+        return c.json({ error: 'exchange_failed' }, status);
+      }
+      logger.error({ err: (err as Error).message }, 'admin: oauth/exchange internal error');
+      return c.json({ error: 'internal_error' }, 500);
     }
   });
 }

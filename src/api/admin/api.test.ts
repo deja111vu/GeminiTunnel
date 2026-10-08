@@ -163,6 +163,23 @@ describe('handleAdminApi', () => {
     expect(res.status).toBe(400);
   });
 
+  it('POST /admin/api/oauth/exchange returns 500 (not 502) for an untyped internal error', async () => {
+    const { finalizeLogin } = await import('../../oauth/finalize.js');
+    const spy = vi
+      .spyOn(await import('../../oauth/finalize.js'), 'finalizeLogin')
+      .mockRejectedValue(new Error('ciphertext too short')); // not a FinalizeError
+    const res = await makeApp(store).request('/admin/api/oauth/exchange', {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify({ state: 'any', code: 'c' }),
+    });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('internal_error');
+    expect(body.error).not.toBe('exchange_failed'); // not 502 upstream
+    spy.mockRestore();
+  });
+
   it('rejects requests without admin bearer', async () => {
     const res = await makeApp(store).request('/admin/api/accounts');
     expect(res.status).toBe(401);
@@ -171,16 +188,17 @@ describe('handleAdminApi', () => {
   it('POST /admin/api/oauth/exchange returns a generic error body that does not echo upstream or user-supplied input', async () => {
     // finalizeLogin throws a message containing user-controlled state and an
     // upstream error string. Neither should leak in the response.
-    const { finalizeLogin } = await import('../../oauth/finalize.js');
-    const spy = vi.spyOn(await import('../../oauth/finalize.js'), 'finalizeLogin').mockRejectedValue(
-      new Error('unknown or expired state: <script>alert(1)</script>'),
-    );
+    const spy = vi
+      .spyOn(await import('../../oauth/finalize.js'), 'finalizeLogin')
+      .mockRejectedValue(new Error('unknown or expired state: <script>alert(1)</script>'));
     const res = await makeApp(store).request('/admin/api/oauth/exchange', {
       method: 'POST',
       headers: adminHeaders(),
       body: JSON.stringify({ state: 'attacker-input', code: 'c' }),
     });
-    expect(res.status).toBe(502);
+    // Untyped Error → 500 (internal), not 502 (upstream) — the distinction
+    // matters for monitoring and on-call pages.
+    expect(res.status).toBe(500);
     const body = (await res.text()).toLowerCase();
     expect(body).not.toContain('attacker-input');
     expect(body).not.toContain('<script>');

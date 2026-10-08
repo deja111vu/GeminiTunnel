@@ -31,21 +31,17 @@ describe('addPending', () => {
   });
 
   it('throws when the pending map is full so a sustained flood cannot OOM the process', () => {
-    // Cap is internal; fill the map past the soft cap to confirm a guard exists.
-    // We add a lot of entries to force a sweep boundary.
+    // All inserts share one Date.now() (no TTL boundary), so the sweep
+    // never helps. The cap must fire on raw size.
     vi.useFakeTimers();
-    const t = Date.now();
-    vi.setSystemTime(t);
-    // bypass the cap check by spreading insertions across non-overlapping TTL windows
+    vi.setSystemTime(Date.now());
     for (let i = 0; i < 1500; i++) {
       try {
         addPending({ state: 'k' + i, verifier: 'v', accountLabel: 'l' });
       } catch {
-        // expected once cap kicks in
-        return;
+        return; // expected
       }
     }
-    // If we got here, no cap fired — fail loudly so the test surfaces the regression.
     throw new Error('addPending did not enforce a size cap');
   });
 });
