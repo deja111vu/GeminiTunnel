@@ -1,10 +1,23 @@
 import { createApp } from './server.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { createStore } from './accounts/store.js';
+import { TokenRefresher } from './accounts/refresher.js';
+import { AccountPool } from './accounts/pool.js';
+import { CodeAssistClient } from './api/codeassist/client.js';
+import { handleChatCompletion } from './api/openai/chat.js';
+import { handleListModels } from './api/openai/models.js';
 
 async function main(): Promise<void> {
-  // bootstrap modules here in future phases
   const app = createApp();
+  const store = createStore(config.dataDir, config.accountsEncryptionKey);
+  const refresher = new TokenRefresher(store, config.accountsEncryptionKey);
+  const pool = new AccountPool({ store, refresher, cooldownMs: config.cooldownAfter429Ms });
+  const client = new CodeAssistClient();
+
+  handleChatCompletion({ app, pool, client, store, config });
+  handleListModels({ app });
+
   const { serve } = await import('@hono/node-server').catch(() => ({ serve: null }));
 
   if (serve) {
