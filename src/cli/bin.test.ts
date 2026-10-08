@@ -24,6 +24,14 @@ vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+// Hermetic TokenRefresher: bin.ts constructs a real one and the refresh
+// path would otherwise hit Google's refresh endpoint, which is brittle in
+// CI / offline. The shared mock lets each test choose the outcome.
+const refreshMock = vi.fn();
+vi.mock('../accounts/refresher.js', () => ({
+  TokenRefresher: vi.fn().mockImplementation(() => ({ forceRefresh: refreshMock })),
+}));
+
 import { parseId, fmtTime, main } from './bin.js';
 import { config } from '../config.js';
 import { createStore } from '../accounts/store.js';
@@ -133,19 +141,10 @@ describe('main()', () => {
 
   it('remove on a non-existent id prints an error and exits 1', async () => {
     // main() rejects with the original error; the top-level .catch in
-    // bin.ts turns that into process.exit(1). Test the chain separately.
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const werr = vi.spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
-    const exit2 = vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('exit');
-    }) as never);
-    try {
-      await expect(main(['remove', '999'])).rejects.toThrow(/account #999 not found/);
-    } finally {
-      log.mockRestore();
-      werr.mockRestore();
-      exit2.mockRestore();
-    }
+    // bin.ts turns that into process.stderr.write + process.exit(1).
+    // The error path is wired through process.exit, not the throw, so
+    // the surrounding exitSpy from beforeEach is what we assert on.
+    await expect(main(['remove', '999'])).rejects.toThrow(/account #999 not found/);
   });
 
   it('unknown command does not create the data dir (lazy init)', async () => {
@@ -166,11 +165,25 @@ describe('main()', () => {
     const s = createStore(dataDir, KEY);
     s.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
     s.close();
-    // refresh fails (no real network) — must still release the handle
-    // so a follow-up createStore on the same data dir doesn't lock.
-    await expect(main(['refresh', '1'])).rejects.toThrow();
+    // Force the controlled TokenRefresher mock to reject so this test
+    // is hermetic (no real network) and the rejection is the only thing
+    // the test depends on.
+    refreshMock.mockRejectedValueOnce(new Error('invalid_grant'));
+    await expect(main(['refresh', '1'])).rejects.toThrow(/invalid_grant/);
     const reopened = createStore(dataDir, KEY);
     expect(reopened.listAccounts()).toHaveLength(1);
     reopened.close();
+  });
+
+  it('refresh success prints token length and exit 0', async () => {
+    const s = createStore(dataDir, KEY);
+    s.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+    s.close();
+    refreshMock.mockReset();
+    refreshMock.mockResolvedValue('x'.repeat(40));
+    await main(['refresh', '1']);
+    const all = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(all).toMatch(/refreshed #1/);
+    expect(all).toMatch(/length=40/);
   });
 });

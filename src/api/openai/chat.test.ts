@@ -31,8 +31,14 @@ function makeFixture() {
   const store = createStore(tmp, KEY);
   const a = store.addAccount({ email: 'a@e.com', refreshToken: 'rt-a' });
   const b = store.addAccount({ email: 'b@e.com', refreshToken: 'rt-b' });
-  const refresher = { getAccessToken: vi.fn(async (id: number) => `tok-${id}`) };
-  const pool = new AccountPool({ store, refresher: refresher as never, cooldownMs: 60_000 });
+  // Both methods are part of the RefresherLike contract; forceRefresh
+  // isn't exercised by these tests but the pool test that uses
+  // makeFixture() must remain type-checked against the real interface.
+  const refresher = {
+    getAccessToken: vi.fn(async (id: number) => `tok-${id}`),
+    forceRefresh: vi.fn(async (id: number) => `tok-${id}`),
+  };
+  const pool = new AccountPool({ store, refresher, cooldownMs: 60_000 });
   return { tmp, store, refresher, pool, accounts: { a, b } };
 }
 

@@ -17,7 +17,9 @@ class FakeClient {
 
 const fakeRefresher: RefresherLike = {
   getAccessToken: vi.fn(async (id: number) => `tok-${id}`),
-} as unknown as RefresherLike;
+  // forceRefresh isn't exercised by these tests but RefresherLike requires it.
+  forceRefresh: vi.fn(async (id: number) => `tok-${id}`),
+};
 
 describe('QuotaPoller', () => {
   let tmp: string;

@@ -102,9 +102,15 @@ function cmdRemove(store: Store, id: number): void {
   console.log(`removed #${id}`);
 }
 
-async function cmdRefresh(refresher: RefresherLike, id: number): Promise<void> {
+async function cmdRefresh(refresher: RefresherLike, store: Store, id: number): Promise<void> {
   const token = await refresher.forceRefresh(id);
-  console.log(`refreshed #${id}; new access token length=${token.length}`);
+  // Read expiry back from the store so the operator sees the same diagnostic
+  // they used to get pre-d15a927; the refresher writes the new expiresAt
+  // atomically with the access token in setActiveToken.
+  const expiresAt = store.getAccount(id)?.tokenExpiresAt ?? null;
+  console.log(
+    `refreshed #${id}; new access token expires at ${fmtTime(expiresAt)} (length=${token.length})`,
+  );
 }
 
 function cmdQuota(store: Store, id: number): void {
@@ -147,7 +153,7 @@ export async function main(argv: string[]): Promise<void> {
         cmdRemove(store, parseId(rest[0]));
         break;
       case 'refresh':
-        await cmdRefresh(refresher, parseId(rest[0]));
+        await cmdRefresh(refresher, store, parseId(rest[0]));
         break;
       case 'quota':
         cmdQuota(store, parseId(rest[0]));

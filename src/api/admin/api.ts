@@ -69,7 +69,10 @@ export function handleAdminApi({
     const id = Number(c.req.param('id'));
     if (!Number.isFinite(id)) return c.json({ error: 'invalid_id' }, 400);
     try {
-      await refresher.getAccessToken(id);
+      // forceRefresh, not getAccessToken: the admin "refresh" button must
+      // always hit Google (operators click it to recover from a stale
+      // cached token), matching what `tunnel refresh` does in the CLI.
+      await refresher.forceRefresh(id);
       const acc = store.getAccount(id);
       logger.debug({ id }, 'admin: refresh ok');
       return c.json({ ok: true, tokenExpiresAt: acc?.tokenExpiresAt ?? null });

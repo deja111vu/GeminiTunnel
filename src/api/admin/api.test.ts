@@ -19,8 +19,12 @@ vi.mock('../../oauth/client.js', () => ({
 
 function makeApp(store: Store) {
   const app = new Hono();
-  // mock refresher: getAccessToken returns a fake token
-  const refresher = { getAccessToken: async (id: number) => `tok-${id}` };
+  // mock refresher: both methods are now part of the RefresherLike contract
+  // (the admin refresh endpoint calls forceRefresh after d15a927).
+  const refresher = {
+    getAccessToken: async (id: number) => `tok-${id}`,
+    forceRefresh: async (id: number) => `tok-${id}`,
+  };
   handleAdminApi({ app, store, refresher: refresher as never, encryptionKey: KEY, adminToken: ADMIN });
   return app;
 }
