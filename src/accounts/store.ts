@@ -147,6 +147,7 @@ export interface Store {
   ) => void;
   listRecentQuotaEvents: (accountId: number, sinceMs: number) => QuotaEvent[];
   listLatestQuotaSnapshots: (accountId: number) => QuotaSnapshot[];
+  hasRefreshToken: (id: number) => boolean;
   readActiveRefreshToken: (id: number) => string | null;
   readActiveAccessToken: (id: number) => { token: string; expiresAt: number } | null;
 }
@@ -215,6 +216,10 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
     `SELECT model, remaining, limit_total, reset_at, fetched_at FROM account_quota_snapshots
      WHERE account_id=? AND id IN (SELECT MAX(id) FROM account_quota_snapshots WHERE account_id=? GROUP BY model)
      ORDER BY model`,
+  );
+
+  const hasRefreshStmt = db.prepare(
+    'SELECT 1 FROM accounts WHERE id=? AND refresh_token_encrypted IS NOT NULL',
   );
 
   const requireKey = (): void => {
@@ -317,6 +322,11 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
         resetAt: r.reset_at,
         fetchedAt: r.fetched_at,
       }));
+    },
+
+    hasRefreshToken(id) {
+      const r = hasRefreshStmt.get(id);
+      return r !== undefined;
     },
 
     readActiveRefreshToken(id) {

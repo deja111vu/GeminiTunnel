@@ -86,9 +86,9 @@ describe('handleAdminApi', () => {
       headers: adminHeaders(),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; tokenPreview: string };
+    const body = (await res.json()) as { ok: boolean; tokenExpiresAt: number | null };
     expect(body.ok).toBe(true);
-    expect(body.tokenPreview).toMatch(/^tok-1…$/);
+    expect(body.tokenExpiresAt).toBeNull();
   });
 
   it('GET /admin/api/accounts/:id/quota returns snapshots and events', async () => {
@@ -166,5 +166,39 @@ describe('handleAdminApi', () => {
   it('rejects requests without admin bearer', async () => {
     const res = await makeApp(store).request('/admin/api/accounts');
     expect(res.status).toBe(401);
+  });
+
+  it('POST /admin/api/oauth/exchange returns a generic error body that does not echo upstream or user-supplied input', async () => {
+    // finalizeLogin throws a message containing user-controlled state and an
+    // upstream error string. Neither should leak in the response.
+    const { finalizeLogin } = await import('../../oauth/finalize.js');
+    const spy = vi.spyOn(await import('../../oauth/finalize.js'), 'finalizeLogin').mockRejectedValue(
+      new Error('unknown or expired state: <script>alert(1)</script>'),
+    );
+    const res = await makeApp(store).request('/admin/api/oauth/exchange', {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify({ state: 'attacker-input', code: 'c' }),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.text()).toLowerCase();
+    expect(body).not.toContain('attacker-input');
+    expect(body).not.toContain('<script>');
+    expect(body).not.toContain('unknown or expired state');
+    spy.mockRestore();
+  });
+
+  it('POST /admin/api/accounts/:id/refresh does not return a token preview (no secret material in body)', async () => {
+    const a = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+    const res = await makeApp(store).request(`/admin/api/accounts/${a.id}/refresh`, {
+      method: 'POST',
+      headers: adminHeaders(),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body).not.toHaveProperty('tokenPreview');
+    expect(body).not.toHaveProperty('accessToken');
+    expect(body).not.toHaveProperty('accessTokenPreview');
   });
 });

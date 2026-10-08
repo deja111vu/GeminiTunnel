@@ -2,10 +2,11 @@ import type { Hono } from 'hono';
 import { z } from 'zod';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { logger } from '../../logger.js';
 import { buildAuthorizationUrl } from '../../oauth/flow.js';
 import { addPending } from '../../oauth/state.js';
-import { finalizeLogin } from '../../oauth/finalize.js';
+import { finalizeLogin, FinalizeError } from '../../oauth/finalize.js';
 import { requireAdmin } from './auth.js';
 import type { Store } from '../../accounts/store.js';
 import type { RefresherLike } from '../../accounts/pool.js';
@@ -49,7 +50,7 @@ export function handleAdminApi({
         lastUsedAt,
         onboardedAt,
         tokenExpiresAt,
-        hasRefreshToken: store.readActiveRefreshToken(a.id) !== null,
+        hasRefreshToken: store.hasRefreshToken(a.id),
       };
     });
     return c.json(accounts);
@@ -68,12 +69,13 @@ export function handleAdminApi({
     const id = Number(c.req.param('id'));
     if (!Number.isFinite(id)) return c.json({ error: 'invalid_id' }, 400);
     try {
-      const token = await refresher.getAccessToken(id);
+      await refresher.getAccessToken(id);
       const acc = store.getAccount(id);
-      return c.json({ ok: true, tokenExpiresAt: acc?.tokenExpiresAt ?? null, tokenPreview: token.slice(0, 8) + '…' });
+      logger.debug({ id }, 'admin: refresh ok');
+      return c.json({ ok: true, tokenExpiresAt: acc?.tokenExpiresAt ?? null });
     } catch (err) {
       logger.warn({ id, err: (err as Error).message }, 'admin: refresh failed');
-      return c.json({ error: 'refresh_failed', message: (err as Error).message }, 502);
+      return c.json({ error: 'refresh_failed' }, 502);
     }
   });
 
@@ -92,7 +94,12 @@ export function handleAdminApi({
     const { url, state, verifier, accountLabel } = buildAuthorizationUrl({
       accountLabel: parsed.data.accountLabel,
     });
-    addPending({ state, verifier, accountLabel });
+    try {
+      addPending({ state, verifier, accountLabel });
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, 'admin: oauth/start refused (pending cap)');
+      return c.json({ error: 'too_many_in_flight' }, 503);
+    }
     return c.json({ url, state });
   });
 
@@ -109,27 +116,36 @@ export function handleAdminApi({
       });
       return c.json({ id: acc.id, email: acc.email });
     } catch (err) {
-      const msg = (err as Error).message;
-      const status = /unknown/i.test(msg) ? 400 : 502;
-      return c.json({ error: 'exchange_failed', message: msg }, status);
+      // Log the upstream error server-side; never echo it (could include
+      // user-controlled state or upstream Google error text). Map typed
+      // errors to status codes without surfacing the raw message.
+      const kind = err instanceof FinalizeError ? err.kind : 'upstream';
+      const status = kind === 'unknown_state' ? 400 : 502;
+      logger.warn({ kind, err: (err as Error).message }, 'admin: oauth/exchange failed');
+      return c.json({ error: 'exchange_failed' }, status);
     }
   });
 }
 
-const UI_CANDIDATES = [
-  () => path.join(process.cwd(), 'src', 'api', 'admin', 'ui.html'),
-  () => path.join(process.cwd(), 'dist', 'api', 'admin', 'ui.html'),
-];
+export interface ServeAdminUiOptions {
+  // Override the HTML file path (used by tests). In production the file is
+  // expected to live next to the compiled module (dist/api/admin/ui.html,
+  // copied by the postbuild script) or alongside the source under src/.
+  htmlPath?: string;
+}
 
-// Serves the static admin SPA. The file is read at boot (single-file
-// vanilla HTML — no asset pipeline). `app.get('/admin')` is the public
-// entry; the SPA's JS reads the bearer token from localStorage and adds
-// the Authorization header to every /admin/api/* call.
-export function serveAdminUi(app: Hono): void {
-  const htmlPath = UI_CANDIDATES.map((p) => p()).find((p) => existsSync(p));
-  if (!htmlPath) {
-    logger.warn('admin UI not found (looked in src/api/admin and dist/api/admin)');
-    return;
+// Serves the static admin SPA. Throws at boot if the HTML file cannot be
+// located — a missing SPA is a deployment error, not a runtime condition
+// to silently degrade past. The SPA's JS reads the bearer token from
+// localStorage and adds the Authorization header to every /admin/api/* call.
+export function serveAdminUi(app: Hono, opts: ServeAdminUiOptions = {}): void {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const htmlPath = opts.htmlPath ?? path.join(__dirname, 'ui.html');
+  if (!existsSync(htmlPath)) {
+    throw new Error(
+      `admin UI not found at ${htmlPath}. ` +
+        'Did you run `npm run build`? The postbuild step copies ui.html into dist/.',
+    );
   }
   const html = readFileSync(htmlPath, 'utf8');
   app.get('/admin', (c) => c.html(html));

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { createStore } from '../accounts/store.js';
 import { addPending, clearPending } from './state.js';
-import { finalizeLogin } from './finalize.js';
+import { finalizeLogin, FinalizeError } from './finalize.js';
 
 // Mock google-auth-library at the module level.
 const getTokenMock = vi.fn();
@@ -74,6 +74,36 @@ describe('finalizeLogin', () => {
     await expect(
       finalizeLogin({ state: 'unknown', code: 'c', store, encryptionKey: KEY }),
     ).rejects.toThrow(/unknown/);
+  });
+
+  it('throws FinalizeError(kind=unknown_state) so the route can map to 400', async () => {
+    try {
+      // Use a recognisable state string so we can confirm it never reaches
+      // the error message (would be reflected to the client by the route).
+      await finalizeLogin({
+        state: 'attacker-controlled-state',
+        code: 'c',
+        store,
+        encryptionKey: KEY,
+      });
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(FinalizeError);
+      expect((err as FinalizeError).kind).toBe('unknown_state');
+      expect((err as Error).message).not.toContain('attacker-controlled-state');
+    }
+  });
+
+  it('throws FinalizeError(kind=upstream) when exchangeCode fails', async () => {
+    addPending({ state: 'st3', verifier: 'ver3', accountLabel: 'l' });
+    getTokenMock.mockRejectedValue(new Error('bad client secret'));
+    try {
+      await finalizeLogin({ state: 'st3', code: 'c', store, encryptionKey: KEY });
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(FinalizeError);
+      expect((err as FinalizeError).kind).toBe('upstream');
+    }
   });
 
   it('updates existing account when re-logged-in', async () => {

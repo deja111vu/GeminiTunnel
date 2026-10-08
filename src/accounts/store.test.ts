@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -77,6 +77,16 @@ describe('store CRUD', () => {
   it('roundtrips refresh_token via readActiveRefreshToken', () => {
     const acc = store.addAccount({ email: 'rt@e.com', refreshToken: 'secret-token' });
     expect(store.readActiveRefreshToken(acc.id)).toBe('secret-token');
+  });
+
+  it('hasRefreshToken answers from a column check, never decrypts', async () => {
+    // Spy on decrypt to prove hasRefreshToken does not touch the AES layer.
+    const enc = await import('./encryption.js');
+    const spy = vi.spyOn(enc, 'decrypt');
+    const a = store.addAccount({ email: 'h@e.com', refreshToken: 'secret' });
+    expect(store.hasRefreshToken(a.id)).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   it('listAccounts returns all added', () => {

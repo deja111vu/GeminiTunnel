@@ -4,6 +4,18 @@ import { exchangeCode, fetchUserEmail } from './flow.js';
 import { encrypt } from '../accounts/encryption.js';
 import { logger } from '../logger.js';
 
+// Typed error so callers can distinguish a client-side flow problem
+// (bad/expired state → 400) from an upstream Google failure (502).
+// The user-supplied state never appears in the response body — callers
+// are expected to map `kind` to a status and return a generic message.
+export type FinalizeErrorKind = 'unknown_state' | 'upstream';
+export class FinalizeError extends Error {
+  constructor(public readonly kind: FinalizeErrorKind, message: string) {
+    super(message);
+    this.name = 'FinalizeError';
+  }
+}
+
 export async function finalizeLogin(args: {
   state: string;
   code: string;
@@ -11,15 +23,30 @@ export async function finalizeLogin(args: {
   encryptionKey: string;
 }): Promise<{ id: number; email: string; status: string }> {
   const pending = popPending(args.state);
-  if (!pending) throw new Error(`unknown or expired state: ${args.state}`);
+  if (!pending) {
+    // Note: we intentionally do NOT include args.state in the error so the
+    // route handler can't echo it back; it carries user-controlled content.
+    throw new FinalizeError('unknown_state', 'unknown or expired state');
+  }
 
-  const tokens = await exchangeCode({ code: args.code, verifier: pending.verifier });
+  let tokens;
+  try {
+    tokens = await exchangeCode({ code: args.code, verifier: pending.verifier });
+  } catch (err) {
+    throw new FinalizeError('upstream', `exchange failed: ${(err as Error).message}`);
+  }
   if (!tokens.refreshToken) {
-    throw new Error(
+    throw new FinalizeError(
+      'upstream',
       'Google did not return a refresh_token (revoke prior consent and retry with prompt=consent)',
     );
   }
-  const email = await fetchUserEmail(tokens.accessToken);
+  let email: string;
+  try {
+    email = await fetchUserEmail(tokens.accessToken);
+  } catch (err) {
+    throw new FinalizeError('upstream', `userinfo failed: ${(err as Error).message}`);
+  }
   const existing = args.store.getAccountByEmail(email);
   if (existing) {
     args.store.setActiveToken(existing.id, tokens.accessToken, tokens.expiresAt);

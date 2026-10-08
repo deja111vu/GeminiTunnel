@@ -19,7 +19,7 @@ export function requireAdmin(expected: string): MiddlewareHandler {
       c.header('WWW-Authenticate', 'Bearer realm="gemini-tunnel"');
       return c.json({ error: 'unauthorized' }, 401);
     }
-    const provided = Buffer.from(match[1] ?? '', 'utf8');
+    const provided = Buffer.from(match[1], 'utf8');
     if (provided.length !== expectedBuf.length || !timingSafeEqual(provided, expectedBuf)) {
       return c.json({ error: 'forbidden' }, 403);
     }

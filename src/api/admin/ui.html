@@ -143,7 +143,7 @@ async function loadAccounts() {
       <tr>
         <td>${escapeHtml(a.id)}</td>
         <td>${escapeHtml(a.email)}</td>
-        <td><span class="pill ${a.status}">${a.status}</span></td>
+        <td><span class="pill ${escapeHtml(a.status)}">${escapeHtml(a.status)}</span></td>
         <td>${escapeHtml(a.tierName || a.tierId || '—')}</td>
         <td>${a.cooldownUntil ? 'until ' + fmtTime(a.cooldownUntil) : '—'}</td>
         <td>${fmtTime(a.lastUsedAt)}</td>
@@ -188,7 +188,10 @@ $('#add-account').addEventListener('click', async () => {
       method: 'POST',
       body: JSON.stringify({ accountLabel: label }),
     });
-    prompt('Open this URL in your browser, then paste the code from the callback URL.\n\n(URL also in clipboard if you allow)', url);
+    // Best-effort clipboard copy so the user can paste the URL straight
+    // into a browser. Silently no-ops on browsers that block the API.
+    navigator.clipboard?.writeText(url).catch(() => {});
+    prompt('Open this URL in your browser (also copied to clipboard), then paste the code from the callback URL.', url);
     const code = prompt('Paste the code (the `code=...` parameter from the redirect URL):');
     if (!code) return;
     const out = await api('/admin/api/oauth/exchange', {
