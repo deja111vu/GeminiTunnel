@@ -33,10 +33,33 @@ describe('parseApiKeys', () => {
   it('drops invalid format with no throw', () => {
     expect(parseApiKeys(`not-an-api-key,${VALID},short`)).toEqual([VALID]);
   });
-  it('drops keys that do not match /^AIza[a-zA-Z0-9_-]{39}$/', () => {
+  it('drops keys that do not match /^AIza[a-zA-Z0-9_-]{39}$/ (length, prefix, charset)', () => {
     // Wrong length
     const tooShort = 'AIzaSyA' + 'a'.repeat(35);
     const tooLong = 'AIzaSyA' + 'a'.repeat(40);
-    expect(parseApiKeys(`${tooShort},${tooLong},${VALID}`)).toEqual([VALID]);
+    // Wrong prefix (lowercase / wrong letters)
+    const wrongPrefix = 'BIzaSyA' + 'a'.repeat(36);
+    const mixedCasePrefix = 'aIzaSyA' + 'a'.repeat(36);
+    // Wrong charset in body: + / = . @ space (each is 43 chars long, passes length, fails charset)
+    const plusBody = 'AIzaSyA' + '+'.repeat(36);
+    const slashBody = 'AIzaSyA' + '/'.repeat(36);
+    const spaceBody = 'AIzaSyA' + ' '.repeat(36);
+    expect(
+      parseApiKeys(`${tooShort},${tooLong},${wrongPrefix},${mixedCasePrefix},${plusBody},${slashBody},${spaceBody},${VALID}`),
+    ).toEqual([VALID]);
+  });
+
+  it('preserves order with whitespace + invalid + valid interleaving', () => {
+    const k1 = VALID;
+    const k2 = 'AIzaSyB' + 'b'.repeat(36);
+    expect(
+      parseApiKeys(`  ,  not-a-key  ,  ${k1} ,  still-not-a-key  ,${k2}  `),
+    ).toEqual([k1, k2]);
+  });
+
+  it('returns readonly array (no mutation hazard)', () => {
+    const a = parseApiKeys(VALID);
+    const b = parseApiKeys(VALID);
+    expect(a).not.toBe(b); // fresh array each call
   });
 });
