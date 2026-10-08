@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { KeyPool } from './keyPool.js';
+import { KeyPool, NoKeyAvailableError } from './keyPool.js';
 
 const K1 = 'AIzaSyA' + 'a'.repeat(36);
 const K2 = 'AIzaSyB' + 'b'.repeat(36);
@@ -105,15 +105,15 @@ describe('KeyPool', () => {
     expect(picks).toEqual([K1, K2].sort());
   });
 
-  it('summary() reports configured/cooldown/bad counts', () => {
+  it('summaryForAllModels() reports configured/cooldown/bad counts', () => {
     const p = makePool([K1, K2, K3]);
     p.recordRateLimit(K1, 'gemini-2.5-pro', 60_000);
     p.markBad(K2);
     now += 1;
-    const s = p.summary();
+    const s = p.summaryForAllModels();
     expect(s.configured).toBe(3);
     expect(s.bad).toBe(1);
-    expect(s.cooldown).toBe(0); // summary() не учитывает per-model
+    expect(s.cooldown).toBe(1);
   });
 
   it('summaryForModel() counts per-model cooldowns', () => {
@@ -192,5 +192,69 @@ describe('KeyPool', () => {
     expect(s.configured).toBe(3);
     expect(s.bad).toBe(1);
     expect(s.cooldown).toBe(2); // K1 (pro) + K2 (flash)
+  });
+
+  it('all bad → throws NoKeyAvailableError с reason=all_bad и retryAfterMs=minBadExpiry', () => {
+    const p = makePool([K1, K2]);
+    p.markBad(K1, 10_000);
+    p.markBad(K2, 30_000);
+    now += 1;
+    try {
+      p.pick();
+      expect.fail('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoKeyAvailableError);
+      const e = err as NoKeyAvailableError;
+      expect(e.reason).toBe('all_bad');
+      expect(e.retryAfterMs).toBeGreaterThan(9_000);
+      expect(e.retryAfterMs).toBeLessThanOrEqual(10_000);
+    }
+  });
+
+  it('all cooldown (per-model) → throws NoKeyAvailableError с reason=all_cooldown', () => {
+    const p = makePool([K1, K2]);
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 5_000);
+    p.recordRateLimit(K2, 'gemini-2.5-pro', 30_000);
+    now += 1;
+    try {
+      p.pick('gemini-2.5-pro');
+      expect.fail('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoKeyAvailableError);
+      const e = err as NoKeyAvailableError;
+      expect(e.reason).toBe('all_cooldown');
+      expect(e.retryAfterMs).toBeGreaterThan(4_000);
+      expect(e.retryAfterMs).toBeLessThanOrEqual(5_000);
+    }
+  });
+
+  it('markBad clears existing per-model cooldowns для ключа (no stale block after bad TTL)', () => {
+    const p = makePool([K1, K2]);
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 120_000);
+    p.markBad(K1, 100);
+    now += 200; // bad TTL expired
+    // Without the fix, K1 would still be on cooldown for pro.
+    const picks = [p.pick('gemini-2.5-pro').key, p.pick('gemini-2.5-pro').key];
+    expect(picks).toContain(K1);
+  });
+
+  it('recordRateLimit берёт max(existing, newUntil) — не сокращает активный cooldown', () => {
+    const p = makePool([K1, K2]);
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 60_000); // until = now + 60_000
+    now += 30_000; // 30s прошло
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 60_000); // newUntil = now + 60_000 = t+120_000, existing=t+60_000
+    now += 1;
+    // K1 must still be on cooldown: existing until (t+60_000) > now (t+30_001)
+    expect(p.pick('gemini-2.5-pro').key).toBe(K2);
+  });
+
+  it('recordRateLimit fresh 429 within active cooldown slides `until` to t+durMax', () => {
+    const p = makePool([K1, K2]);
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 10_000); // until = now+10_000
+    now += 5_000;
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 30_000); // newUntil = now+30_000 = t+35_000, > existing t+10_000
+    now += 1;
+    // Should still be on cooldown
+    expect(p.pick('gemini-2.5-pro').key).toBe(K2);
   });
 });

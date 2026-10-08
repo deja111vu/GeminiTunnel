@@ -5,6 +5,17 @@
 // Startup jitter: each key gets a random nextAvailableAfter (0..jitterMs)
 // to prevent thundering herd on a fresh boot.
 
+export type NoKeyReason = 'all_bad' | 'all_cooldown' | 'unknown';
+
+export class NoKeyAvailableError extends Error {
+  constructor(
+    public readonly reason: NoKeyReason,
+    public readonly retryAfterMs: number | null,
+  ) {
+    super(`no_api_key_available: ${reason}`);
+  }
+}
+
 export interface KeyPoolOptions {
   keys: string[];
   cooldownMs: number;
@@ -21,6 +32,12 @@ export interface KeyPoolSummary {
   configured: number;
   cooldown: number;
   bad: number;
+}
+
+// Deterministic string comparator: < / > / ===, no locale sensitivity so
+// test runs and CI agree on tie-break ordering.
+function cmpKey(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export class KeyPool {
@@ -60,13 +77,14 @@ export class KeyPool {
   pick(model?: string): PickedKey {
     const t = this.now();
     const candidates: { key: string; seq: number }[] = [];
+    let anyBadOrJitter = false;
     for (const k of this.keys) {
       // Bad?
       const badUntil = this.badUntil.get(k);
-      if (badUntil !== undefined && badUntil > t) continue;
+      if (badUntil !== undefined && badUntil > t) { anyBadOrJitter = true; continue; }
       // Startup jitter?
       const avail = this.nextAvailableAfter.get(k);
-      if (avail !== undefined && avail > t) continue;
+      if (avail !== undefined && avail > t) { anyBadOrJitter = true; continue; }
       // Per-model cooldown?
       if (model !== undefined) {
         const modelMap = this.cooldownByModel.get(k);
@@ -77,10 +95,28 @@ export class KeyPool {
       candidates.push({ key: k, seq });
     }
     if (candidates.length === 0) {
-      throw new Error('no_api_key_available');
+      const bad = this.minBadExpiry();
+      const cool = model !== undefined ? this.minCooldownExpiry(model) : null;
+      // Prefer the longer wait (bad > cooldown) so the client doesn't retry
+      // too soon. If only cooldown applies, use it. If only bad, use that.
+      let retryAfterMs: number | null = null;
+      let reason: NoKeyReason;
+      if (anyBadOrJitter && bad !== null) {
+        retryAfterMs = bad;
+        reason = 'all_bad';
+      } else if (cool !== null) {
+        retryAfterMs = cool;
+        reason = 'all_cooldown';
+      } else if (bad !== null) {
+        retryAfterMs = bad;
+        reason = 'all_bad';
+      } else {
+        reason = 'unknown';
+      }
+      throw new NoKeyAvailableError(reason, retryAfterMs);
     }
     // Sort by seq ascending (oldest pick first), then by key for determinism.
-    candidates.sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key));
+    candidates.sort((a, b) => a.seq - b.seq || cmpKey(a.key, b.key));
     const chosen = candidates[0];
     this.seqByKey.set(chosen.key, this.nextSeq++);
     return { key: chosen.key };
@@ -88,13 +124,17 @@ export class KeyPool {
 
   recordRateLimit(key: string, model: string, durationMs?: number): void {
     const t = this.now();
-    const until = t + (durationMs ?? this.cooldownMs);
+    const newUntil = t + (durationMs ?? this.cooldownMs);
     let m = this.cooldownByModel.get(key);
     if (!m) {
       m = new Map();
       this.cooldownByModel.set(key, m);
     }
-    m.set(model, until);
+    // Take the later of the existing `until` and `newUntil` so a fresh 429
+    // doesn't shorten an already-active window — matches Google's behaviour
+    // where Retry-After is the *minimum* remaining time.
+    const existing = m.get(model);
+    m.set(model, existing !== undefined && existing > newUntil ? existing : newUntil);
   }
 
   clearCooldown(key: string, model: string): void {
@@ -104,15 +144,10 @@ export class KeyPool {
   markBad(key: string, durationMs?: number): void {
     const t = this.now();
     this.badUntil.set(key, t + (durationMs ?? this.badTtlMs));
-  }
-
-  summary(): KeyPoolSummary {
-    const t = this.now();
-    let bad = 0;
-    for (const [, until] of this.badUntil) {
-      if (until > t) bad++;
-    }
-    return { configured: this.keys.length, cooldown: 0, bad };
+    // A "bad" key overrides any per-model cooldown for that key — when the
+    // bad TTL expires, the key should be available again, not stuck on an
+    // older cooldown entry that the caller never cleared.
+    this.cooldownByModel.delete(key);
   }
 
   summaryForModel(model: string): KeyPoolSummary {
