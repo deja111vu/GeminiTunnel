@@ -10,6 +10,11 @@ const CLIENT_METADATA = {
   metadata: { ideType: 'IDE_UNSPECIFIED', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' },
 };
 
+// Bounded concurrency for per-account quota fetches. 8 simultaneous
+// requests is high enough that a 200-account fleet finishes a cycle
+// quickly, low enough that we don't exhaust upstream sockets.
+const POLL_CONCURRENCY = 8;
+
 export interface QuotaPollerDeps {
   store: Store;
   refresher: RefresherLike;
@@ -27,6 +32,10 @@ export class QuotaPoller {
   private readonly client: CodeAssistClient;
   private readonly intervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
+  // Guards against overlapping runs when a cycle is slower than the
+  // interval. Without this, slow upstream can stack concurrent runs
+  // and exhaust the socket pool.
+  private inFlight: Promise<void> | null = null;
 
   constructor({ store, refresher, client, intervalMs }: QuotaPollerDeps) {
     this.store = store;
@@ -37,9 +46,18 @@ export class QuotaPoller {
 
   start(): void {
     if (this.timer) return;
+    // Fire one immediately so a fresh deploy doesn't sit with empty
+    // quota for the full interval before the first observation.
+    void this.runOnce();
     this.timer = setInterval(() => {
-      this.runOnce().catch((err) => {
-        logger.error({ err: (err as Error).message }, 'quota: runOnce crashed');
+      // Drop the tick if the previous run is still in flight — better
+      // to skip a cycle than to stack concurrent quota fetches.
+      if (this.inFlight) {
+        logger.debug('quota: previous run still in flight, skipping tick');
+        return;
+      }
+      this.inFlight = this.runOnce().finally(() => {
+        this.inFlight = null;
       });
     }, this.intervalMs);
     // Don't keep the event loop alive solely for the poller.
@@ -53,35 +71,65 @@ export class QuotaPoller {
   }
 
   async runOnce(): Promise<void> {
-    for (const acc of this.store.listAccounts()) {
-      if (acc.status !== 'active') continue;
-      try {
-        const token = await this.refresher.getAccessToken(acc.id);
-        const lc = await this.client.loadCodeAssist(CLIENT_METADATA, token);
-        const project = lc.cloudaicompanionProject;
-        if (!project) {
-          logger.debug({ id: acc.id, email: acc.email }, 'quota: no project, skipping');
+    const accounts = this.store.listAccounts().filter((a) => a.status === 'active');
+    // Run with bounded concurrency so one slow account does not block
+    // the whole batch (sequential O(N) was the previous shape).
+    await runWithConcurrency(accounts, POLL_CONCURRENCY, (acc) => this.pollOne(acc));
+  }
+
+  private async pollOne(acc: { id: number; email: string }): Promise<void> {
+    try {
+      const token = await this.refresher.getAccessToken(acc.id);
+      const lc = await this.client.loadCodeAssist(CLIENT_METADATA, token);
+      const project = lc.cloudaicompanionProject;
+      if (!project) {
+        logger.debug({ id: acc.id, email: acc.email }, 'quota: no project, skipping');
+        return;
+      }
+      const q = await this.client.retrieveUserQuota({ project }, token);
+      for (const b of q.buckets ?? []) {
+        if (!b.modelId) continue;
+        // Skip buckets where the upstream didn't actually report amounts —
+        // recording remaining=0/total=0 would falsely flag the account
+        // as exhausted in the admin UI.
+        if (typeof b.remainingAmount !== 'number' || typeof b.totalAmount !== 'number') {
+          logger.debug({ id: acc.id, model: b.modelId }, 'quota: bucket missing amounts, skipping');
           continue;
         }
-        const q = await this.client.retrieveUserQuota({ project }, token);
-        for (const b of q.buckets ?? []) {
-          if (!b.modelId) continue;
-          const resetAt = b.resetTime ? Date.parse(b.resetTime) : NaN;
-          this.store.recordQuotaSnapshot(
-            acc.id,
-            b.modelId,
-            b.remainingAmount ?? 0,
-            b.totalAmount ?? 0,
-            Number.isFinite(resetAt) ? resetAt : undefined,
-          );
-        }
-      } catch (err) {
-        // Isolate: one account's failure must not skip the rest.
-        logger.warn(
-          { id: acc.id, email: acc.email, err: (err as Error).message },
-          'quota: poll failed for account',
+        const resetAt = b.resetTime ? Date.parse(b.resetTime) : NaN;
+        this.store.recordQuotaSnapshot(
+          acc.id,
+          b.modelId,
+          b.remainingAmount,
+          b.totalAmount,
+          Number.isFinite(resetAt) ? resetAt : undefined,
         );
       }
+    } catch (err) {
+      // Isolate: one account's failure must not skip the rest.
+      logger.warn(
+        { id: acc.id, email: acc.email, err: (err as Error).message },
+        'quota: poll failed for account',
+      );
     }
   }
+}
+
+// ponytail: minimal semaphore — no abort/timeout needed, the caller
+// already has try/catch on each task. 8-way concurrency is a constant
+// (POLL_CONCURRENCY) so a plain windowed loop is enough.
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      await fn(items[idx]!);
+    }
+  });
+  await Promise.all(workers);
 }

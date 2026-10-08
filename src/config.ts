@@ -13,7 +13,7 @@ const schema = z.object({
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1),
   DATA_DIR: z.string().default('./data'),
   UPSTREAM_BASE_URL: z.string().url().default('https://cloudcode-pa.googleapis.com'),
-  QUOTA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
+  QUOTA_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(5 * 60 * 1000),
   COOLDOWN_AFTER_429_MS: z.coerce.number().int().positive().default(60 * 1000),
   SWITCH_BUDGET: z.coerce.number().int().positive().default(4),
   REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),

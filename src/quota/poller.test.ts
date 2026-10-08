@@ -76,6 +76,51 @@ describe('QuotaPoller', () => {
     expect(store.listLatestQuotaSnapshots(a.id)).toHaveLength(0);
   });
 
+  it('runOnce skips buckets where the upstream did not report amounts (no false 0/0)', async () => {
+    const a = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+    client.loadCodeAssist.mockResolvedValue({ cloudaicompanionProject: 'proj-1' });
+    client.retrieveUserQuota.mockResolvedValue({
+      // Two buckets, one valid and one with missing amounts. The latter
+      // would otherwise be stored as remaining=0/total=0 and falsely
+      // report the account as exhausted in the admin UI.
+      buckets: [
+        { modelId: 'gemini-2.5-pro', remainingAmount: 80, totalAmount: 100 },
+        { modelId: 'gemini-2.5-flash' /* no amounts */ },
+      ],
+    });
+    const poller = new QuotaPoller({ store, refresher: fakeRefresher, client: client as never, intervalMs: 999_999 });
+    await poller.runOnce();
+    const snaps = store.listLatestQuotaSnapshots(a.id);
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0].model).toBe('gemini-2.5-pro');
+  });
+
+  it('runOnce polls accounts concurrently so a slow account does not block the batch', async () => {
+    store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+    store.addAccount({ email: 'b@e.com', refreshToken: 'rt' });
+    const startedAt: number[] = [];
+    const order: string[] = [];
+    client.loadCodeAssist.mockImplementation(async (_md, tok) => {
+      const which = tok === 'tok-1' ? 'a' : 'b';
+      startedAt.push(Date.now());
+      order.push(`start-${which}`);
+      // a takes 100ms, b is instant
+      if (which === 'a') await new Promise((r) => setTimeout(r, 100));
+      order.push(`end-${which}`);
+      return { cloudaicompanionProject: `proj-${which}` };
+    });
+    client.retrieveUserQuota.mockResolvedValue({
+      buckets: [{ modelId: 'gemini-2.5-pro', remainingAmount: 50, totalAmount: 100 }],
+    });
+    const poller = new QuotaPoller({ store, refresher: fakeRefresher, client: client as never, intervalMs: 999_999 });
+    const t0 = Date.now();
+    await poller.runOnce();
+    // Both must START before either ends — the sequential version would
+    // emit start-a, end-a, start-b, end-b.
+    expect(order.indexOf('start-b')).toBeLessThan(order.indexOf('end-a'));
+    expect(Date.now() - t0).toBeLessThan(200); // a's 100ms wait, not a+b
+  });
+
   it('runOnce isolates failures: one failing account does not block the others', async () => {
     const a = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
     const b = store.addAccount({ email: 'b@e.com', refreshToken: 'rt' });

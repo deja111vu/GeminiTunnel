@@ -36,6 +36,16 @@ async function main(): Promise<void> {
   });
   poller.start();
 
+  // Graceful shutdown: stop the poller on SIGINT/SIGTERM so a
+  // mid-iteration runOnce doesn't get cut off, leaving the interval
+  // armed without a clean teardown signal.
+  const shutdown = (): void => {
+    poller.stop();
+    logger.info('gemini-tunnel shutting down');
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+
   const { serve } = await import('@hono/node-server').catch(() => ({ serve: null }));
 
   if (serve) {
