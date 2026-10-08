@@ -8,6 +8,7 @@ import { CodeAssistClient } from './api/codeassist/client.js';
 import { handleChatCompletion } from './api/openai/chat.js';
 import { handleListModels } from './api/openai/models.js';
 import { handleAdminApi, serveAdminUi } from './api/admin/api.js';
+import { QuotaPoller } from './quota/poller.js';
 
 async function main(): Promise<void> {
   const app = createApp();
@@ -26,6 +27,14 @@ async function main(): Promise<void> {
     encryptionKey: config.accountsEncryptionKey,
     adminToken: config.adminToken,
   });
+
+  const poller = new QuotaPoller({
+    store,
+    refresher,
+    client,
+    intervalMs: config.quotaPollIntervalMs,
+  });
+  poller.start();
 
   const { serve } = await import('@hono/node-server').catch(() => ({ serve: null }));
 
