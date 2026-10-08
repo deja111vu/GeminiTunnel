@@ -47,6 +47,30 @@ const clientKey = z
   .min(16, 'CLIENT_API_KEY must be at least 16 chars when set')
   .optional();
 
+// Inline copy of the parser from src/api/gemini/keyConfig.ts. We can't
+// import that module here because config.ts is loaded at startup by every
+// other module (logger, store, etc.), creating a cycle. The unit tests in
+// keyConfig.test.ts pin behaviour; if you change the regex, change it
+// there AND here.
+const AIZA_PREFIX = 'AIza';
+const KEY_BODY = '[a-zA-Z0-9_-]';
+const KEY_RE: Readonly<RegExp> = new RegExp(`^${AIZA_PREFIX}${KEY_BODY}{39}$`);
+
+const geminiApiKeys = z
+  .string()
+  .optional()
+  .transform((v): readonly string[] => {
+    if (!v) return [];
+    return [
+      ...new Set(
+        v
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => KEY_RE.test(s)),
+      ),
+    ];
+  });
+
 const schema = z.object({
   PORT: z.coerce.number().int().positive().default(8000),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
@@ -64,6 +88,10 @@ const schema = z.object({
   REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   HOST: z.string().default('0.0.0.0'),
   CLIENT_API_KEY: clientKey,
+  // Gemini API key path (parallel upstream). Empty/unset = OAuth-only.
+  GEMINI_API_KEYS: geminiApiKeys.optional(),
+  KEY_COOLDOWN_AFTER_429_MS: z.coerce.number().int().positive().default(60_000),
+  KEY_BAD_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
 });
 
 export type Config = Readonly<{
@@ -81,6 +109,10 @@ export type Config = Readonly<{
   requestTimeoutMs: number;
   host: string;
   clientApiKey: string | undefined;
+  geminiApiKeys: readonly string[];
+  keyCooldownAfter429Ms: number;
+  keyBadTtlMs: number;
+  keyPathEnabled: boolean; // derived: geminiApiKeys.length > 0
 }>;
 
 function loadConfig(): Config {
@@ -106,7 +138,11 @@ function loadConfig(): Config {
     REQUEST_TIMEOUT_MS,
     HOST,
     CLIENT_API_KEY,
+    GEMINI_API_KEYS,
+    KEY_COOLDOWN_AFTER_429_MS,
+    KEY_BAD_TTL_MS,
   } = parsed.data;
+  const keys = GEMINI_API_KEYS ?? [];
   return Object.freeze({
     port: PORT,
     logLevel: LOG_LEVEL,
@@ -122,6 +158,10 @@ function loadConfig(): Config {
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
     host: HOST,
     clientApiKey: CLIENT_API_KEY,
+    geminiApiKeys: keys,
+    keyCooldownAfter429Ms: KEY_COOLDOWN_AFTER_429_MS,
+    keyBadTtlMs: KEY_BAD_TTL_MS,
+    keyPathEnabled: keys.length > 0,
   });
 }
 

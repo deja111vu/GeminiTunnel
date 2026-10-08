@@ -55,4 +55,40 @@ describe('config', () => {
     process.env.UPSTREAM_BASE_URL = 'https://attacker:secret@evil.com/';
     await expect(import('./config.js')).rejects.toThrow(/credential/i);
   });
+
+  it('parses GEMINI_API_KEYS CSV into array, dedupes, drops invalid', async () => {
+    vi.resetModules();
+    process.env.ADMIN_TOKEN = REQUIRED_ENV.ADMIN_TOKEN;
+    process.env.ACCOUNTS_ENCRYPTION_KEY = REQUIRED_ENV.ACCOUNTS_ENCRYPTION_KEY;
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = REQUIRED_ENV.GOOGLE_OAUTH_CLIENT_SECRET;
+    const validKey = 'AIzaSyA' + 'a'.repeat(36);
+    process.env.GEMINI_API_KEYS = `${validKey},${validKey},invalid,short`;
+    const { config } = await import('./config.js');
+    expect(config.geminiApiKeys).toEqual([validKey]);
+    expect(config.keyPathEnabled).toBe(true);
+  });
+
+  it('keyPathEnabled=false when GEMINI_API_KEYS empty/unset', async () => {
+    vi.resetModules();
+    process.env.ADMIN_TOKEN = REQUIRED_ENV.ADMIN_TOKEN;
+    process.env.ACCOUNTS_ENCRYPTION_KEY = REQUIRED_ENV.ACCOUNTS_ENCRYPTION_KEY;
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = REQUIRED_ENV.GOOGLE_OAUTH_CLIENT_SECRET;
+    delete process.env.GEMINI_API_KEYS;
+    const { config } = await import('./config.js');
+    expect(config.geminiApiKeys).toEqual([]);
+    expect(config.keyPathEnabled).toBe(false);
+  });
+
+  it('uses defaults for KEY_COOLDOWN_AFTER_429_MS and KEY_BAD_TTL_MS', async () => {
+    vi.resetModules();
+    process.env.ADMIN_TOKEN = REQUIRED_ENV.ADMIN_TOKEN;
+    process.env.ACCOUNTS_ENCRYPTION_KEY = REQUIRED_ENV.ACCOUNTS_ENCRYPTION_KEY;
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = REQUIRED_ENV.GOOGLE_OAUTH_CLIENT_SECRET;
+    delete process.env.GEMINI_API_KEYS;
+    delete process.env.KEY_COOLDOWN_AFTER_429_MS;
+    delete process.env.KEY_BAD_TTL_MS;
+    const { config } = await import('./config.js');
+    expect(config.keyCooldownAfter429Ms).toBe(60_000);
+    expect(config.keyBadTtlMs).toBe(86_400_000);
+  });
 });
