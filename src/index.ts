@@ -7,6 +7,7 @@ import { AccountPool } from './accounts/pool.js';
 import { CodeAssistClient } from './api/codeassist/client.js';
 import { handleChatCompletion } from './api/openai/chat.js';
 import { handleListModels } from './api/openai/models.js';
+import { handleAdminApi, serveAdminUi } from './api/admin/api.js';
 
 async function main(): Promise<void> {
   const app = createApp();
@@ -17,6 +18,14 @@ async function main(): Promise<void> {
 
   handleChatCompletion({ app, pool, client, store, config });
   handleListModels({ app });
+  serveAdminUi(app);
+  handleAdminApi({
+    app,
+    store,
+    refresher,
+    encryptionKey: config.accountsEncryptionKey,
+    adminToken: config.adminToken,
+  });
 
   const { serve } = await import('@hono/node-server').catch(() => ({ serve: null }));
 
