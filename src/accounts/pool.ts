@@ -2,6 +2,7 @@ import type { Store, Account } from './store.js';
 
 export interface RefresherLike {
   getAccessToken: (accountId: number) => Promise<string>;
+  forceRefresh: (accountId: number) => Promise<string>;
 }
 
 export interface PickedAccount {

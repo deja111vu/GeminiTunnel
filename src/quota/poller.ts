@@ -47,21 +47,23 @@ export class QuotaPoller {
   start(): void {
     if (this.timer) return;
     // Fire one immediately so a fresh deploy doesn't sit with empty
-    // quota for the full interval before the first observation.
-    void this.runOnce();
-    this.timer = setInterval(() => {
-      // Drop the tick if the previous run is still in flight — better
-      // to skip a cycle than to stack concurrent quota fetches.
-      if (this.inFlight) {
-        logger.debug('quota: previous run still in flight, skipping tick');
-        return;
-      }
-      this.inFlight = this.runOnce().finally(() => {
-        this.inFlight = null;
-      });
-    }, this.intervalMs);
+    // quota for the full interval before the first observation. Route
+    // through the inFlight guard so the immediate run cannot overlap
+    // an interval tick that fires while it is still running.
+    this.scheduleRun();
+    this.timer = setInterval(() => this.scheduleRun(), this.intervalMs);
     // Don't keep the event loop alive solely for the poller.
     this.timer.unref?.();
+  }
+
+  private scheduleRun(): void {
+    if (this.inFlight) {
+      logger.debug('quota: previous run still in flight, skipping tick');
+      return;
+    }
+    this.inFlight = this.runOnce().finally(() => {
+      this.inFlight = null;
+    });
   }
 
   stop(): void {

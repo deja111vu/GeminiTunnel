@@ -30,7 +30,11 @@ describe('AccountPool', () => {
   }
 
   function mockRefresher(stub: (id: number) => Promise<string> = async (id) => `tok-${id}`) {
-    return { getAccessToken: vi.fn(stub) };
+    // forceRefresh isn't exercised by these tests but RefresherLike requires it.
+    return {
+      getAccessToken: vi.fn(stub),
+      forceRefresh: vi.fn(stub),
+    };
   }
 
   it('picks the active account with the oldest lastUsedAt (LRU)', async () => {

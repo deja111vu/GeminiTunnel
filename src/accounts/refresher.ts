@@ -23,6 +23,24 @@ export class TokenRefresher {
       return cached.token;
     }
 
+    return this.doRefresh(accountId);
+  }
+
+  // Bypass the cache and always hit Google's refresh endpoint. Used by
+  // the `tunnel refresh` CLI command where the operator explicitly wants
+  // a fresh access token (e.g. after rotating credentials server-side).
+  async forceRefresh(accountId: number): Promise<string> {
+    const acc = this.store.getAccount(accountId);
+    if (!acc) throw new Error(`account ${accountId} not found`);
+    if (acc.status === 'invalid' || acc.status === 'ineligible') {
+      throw new Error(`account ${acc.email} status=${acc.status}; re-login required`);
+    }
+    return this.doRefresh(accountId);
+  }
+
+  private async doRefresh(accountId: number): Promise<string> {
+    const acc = this.store.getAccount(accountId);
+    if (!acc) throw new Error(`account ${accountId} not found`);
     const refreshToken = this.store.readActiveRefreshToken(accountId);
     if (!refreshToken) {
       this.store.setStatus(accountId, 'invalid', 'no_refresh_token');
