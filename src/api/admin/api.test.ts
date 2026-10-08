@@ -189,6 +189,62 @@ describe('handleAdminApi', () => {
     expect(res.status).toBe(401);
   });
 
+  it('POST /admin/api/login sets HttpOnly+Secure+SameSite=Strict cookie on success', async () => {
+    // F18: localStorage is replaced by an HttpOnly cookie so an XSS
+    // payload can't exfil the admin token. The cookie must also be
+    // Secure (HTTPS only) and SameSite=Strict (CSRF defense).
+    const res = await makeApp(store).request('/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: ADMIN }),
+    });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/HttpOnly/i);
+    expect(setCookie).toMatch(/Secure/i);
+    expect(setCookie).toMatch(/SameSite=Strict/i);
+    expect(setCookie).toMatch(/Path=\/admin/i);
+    // The token value must not be in the body (no echo).
+    const body = (await res.json()) as { ok: boolean };
+    expect(body.ok).toBe(true);
+  });
+
+  it('POST /admin/api/login returns 401 on wrong token', async () => {
+    const res = await makeApp(store).request('/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'wrong'.padEnd(64, 'x') }),
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('requireAdmin accepts a request that authenticates via cookie', async () => {
+    // After login, the SPA stores nothing — it relies on the browser
+    // auto-sending the cookie. Simulate that by forwarding the Set-Cookie
+    // header back as Cookie.
+    const login = await makeApp(store).request('/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: ADMIN }),
+    });
+    const setCookie = login.headers.get('set-cookie') ?? '';
+    const cookieValue = /gemini-tunnel-admin=([^;]+)/.exec(setCookie)?.[1] ?? '';
+    const res = await makeApp(store).request('/admin/api/accounts', {
+      headers: { cookie: `gemini-tunnel-admin=${cookieValue}` },
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json())).toEqual([]);
+  });
+
+  it('POST /admin/api/logout clears the cookie', async () => {
+    const logout = await makeApp(store).request('/admin/api/logout', { method: 'POST' });
+    expect(logout.status).toBe(204);
+    const setCookie = logout.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/gemini-tunnel-admin=;/); // empty value
+    expect(setCookie).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/i);
+  });
+
   it('POST /admin/api/oauth/exchange returns a generic error body that does not echo upstream or user-supplied input', async () => {
     // finalizeLogin throws a message containing user-controlled state and an
     // upstream error string. Neither should leak in the response.

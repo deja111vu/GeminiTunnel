@@ -29,7 +29,7 @@ export async function finalizeLogin(args: {
     throw new FinalizeError('unknown_state', 'unknown or expired state');
   }
 
-  let tokens;
+  let tokens: { refreshToken: string | null; accessToken: string; expiresAt: number };
   try {
     tokens = await exchangeCode({ code: args.code, verifier: pending.verifier });
   } catch (err) {
@@ -49,10 +49,20 @@ export async function finalizeLogin(args: {
   }
   const existing = args.store.getAccountByEmail(email);
   if (existing) {
-    args.store.setActiveToken(existing.id, tokens.accessToken, tokens.expiresAt);
-    args.store.db
-      .prepare('UPDATE accounts SET refresh_token_encrypted=? WHERE id=?')
-      .run(encrypt(tokens.refreshToken, args.encryptionKey), existing.id);
+    // Atomic write: the new access_token and the freshly issued
+    // refresh_token must land together. A crash between the two writes
+    // would re-use the prior refresh_token and Google would reject it
+    // with invalid_grant.
+    const refreshToken = tokens.refreshToken;
+    const accessToken = tokens.accessToken;
+    const expiresAt = tokens.expiresAt;
+    const txn = args.store.db.transaction(() => {
+      args.store.setActiveToken(existing.id, accessToken, expiresAt);
+      args.store.db
+        .prepare('UPDATE accounts SET refresh_token_encrypted=? WHERE id=?')
+        .run(encrypt(refreshToken, args.encryptionKey), existing.id);
+    });
+    txn();
     logger.info({ email, id: existing.id }, 're-logged-in existing account');
     return { id: existing.id, email, status: existing.status };
   }

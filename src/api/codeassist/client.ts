@@ -145,6 +145,19 @@ export class CodeAssistClient {
           if (done) {
             const { events } = parseBuffer();
             for (const ev of events) yield ev;
+            // F12: any leftover bytes in `buf` mean the upstream closed
+            // mid-event (no terminating blank line). We can't parse a
+            // half-event safely, so warn instead of silently dropping.
+            if (buf.length > 0) {
+              // ponytail: pino import would be a circular dep through the
+              // converter; use console.warn so the message still surfaces
+              // in `docker logs` without dragging the logger into this
+              // file. The upstream contract is to terminate every event
+              // with a blank line; this should be rare.
+              console.warn(
+                `[codeassist] SSE stream closed with ${buf.length} unparsed tail bytes`,
+              );
+            }
             return;
           }
         }

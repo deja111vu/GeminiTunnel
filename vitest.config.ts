@@ -14,7 +14,9 @@ export default defineConfig({
       ADMIN_TOKEN: '0000000000000000000000000000000000000000000000000000000000000000',
       ACCOUNTS_ENCRYPTION_KEY:
         '1111111111111111111111111111111111111111111111111111111111111111',
-      GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret',
+      // 20+ chars to satisfy the placeholder/length check. The literal
+      // "GOCSPX-" prefix is reserved for real Google-issued values.
+      GOOGLE_OAUTH_CLIENT_SECRET: 'GOCSPX-TEST-FAKE-SECRET-PLACEHOLDER',
     },
   },
 });

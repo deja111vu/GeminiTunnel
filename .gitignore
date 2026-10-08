@@ -1,7 +1,9 @@
 node_modules/
 dist/
-.env
-.env.local
+# Block ALL .env variants (.env.production, .env.staging, etc.) by default;
+# explicitly allow the example file so the doc stays in the repo.
+.env*
+!.env.example
 data/
 *.log
 coverage/

@@ -13,6 +13,7 @@ import type { ChatCompletionRequest, ChatCompletionResponse } from './types.js';
 import type { AccountPool } from '../../accounts/pool.js';
 import type { Store } from '../../accounts/store.js';
 import type { Config } from '../../config.js';
+import type { GenerateContentResponse } from '../codeassist/types.js';
 
 // Body-shape caps. Bound at the trust boundary so a single client can't
 // pin memory in the JSON parser, zod validator, or Code Assist request body.
@@ -37,7 +38,10 @@ const ChatBody = z.object({
   stream: z.boolean().optional(),
   temperature: z.number().min(0).max(2).optional(),
   top_p: z.number().min(0).max(1).optional(),
-  max_tokens: z.number().int().positive().max(1_000_000).optional(),
+  // 32k matches the largest realistic Gemini response budget; raising
+  // this lets a single request burn a 4x-multiplied upstream budget via
+  // SWITCH_BUDGET retries.
+  max_tokens: z.number().int().positive().max(32_000).optional(),
   tools: z
     .array(
       z.object({
@@ -134,23 +138,52 @@ export function handleChatCompletion({
       try {
         const upstream = client.streamGenerateContent(caReq, picked.token, c.req.raw.signal);
         if (body.stream) {
-          // We start streaming immediately so the client sees 200 + chunked
-          // bytes right away. Upstream errors that surface mid-stream are
-          // recorded against the pool and surfaced as a final error chunk
-          // (NOT a status change — the headers are already flushed).
+          // F6: pull the first chunk BEFORE returning a 200, so an upstream
+          // 401/403/429/5xx becomes an HTTP status + JSON body, not a 200
+          // followed by a trailing error SSE event. This is the contract
+          // OpenAI clients (and their retry middleware) actually inspect.
+          const it = upstream[Symbol.asyncIterator]();
+          let first: IteratorResult<GenerateContentResponse>;
+          try {
+            first = await it.next();
+          } catch (err) {
+            if (err instanceof HttpError) {
+              const action = classifyUpstreamError(err, picked.accountId, model, pool);
+              if (action === 'fatal') {
+                lastFatalStatus = err.status;
+                break;
+              }
+              continue; // try next account
+            }
+            logger.warn(
+              { err: (err as Error).message, account: picked.email },
+              'stream first-chunk error',
+            );
+            continue;
+          }
+          if (first.done) {
+            // Upstream closed with zero events. Treat as fatal; client got
+            // an empty SSE that OpenAI SDKs will surface as a parse error.
+            lastFatalStatus = 502;
+            break;
+          }
+          // We have at least one chunk. Safe to commit to 200 + SSE; any
+          // error after this point is mid-stream and only reaches the
+          // client as a trailing error event.
+          const firstMeta: ChunkMeta = { id: chunkId, created, isFirst: true };
+          const head = chunkToSse(fromCodeAssistChunk(first.value, model, firstMeta));
           const sse = new ReadableStream<Uint8Array>({
             async start(controller) {
               const enc = new TextEncoder();
-              let firstChunk = true;
+              controller.enqueue(enc.encode(head));
               let upstreamErr: HttpError | null = null;
               try {
-                for await (const chunk of upstream) {
+                while (true) {
                   if (c.req.raw.signal.aborted) break;
-                  const m: ChunkMeta = firstChunk
-                    ? { id: chunkId, created, isFirst: true }
-                    : { id: chunkId, created, isFirst: false };
-                  firstChunk = false;
-                  controller.enqueue(enc.encode(chunkToSse(fromCodeAssistChunk(chunk, model, m))));
+                  const next = await it.next();
+                  if (next.done) break;
+                  const m: ChunkMeta = { id: chunkId, created, isFirst: false };
+                  controller.enqueue(enc.encode(chunkToSse(fromCodeAssistChunk(next.value, model, m))));
                 }
                 controller.enqueue(enc.encode('data: [DONE]\n\n'));
               } catch (err) {
@@ -161,11 +194,7 @@ export function handleChatCompletion({
                 );
               } finally {
                 if (upstreamErr) {
-                  // Surface the error to the pool AFTER the stream is done
-                  // so the next pick sees the new state.
                   classifyUpstreamError(upstreamErr, picked.accountId, model, pool);
-                  // Best-effort error chunk for the client (we can't change
-                  // status now; chunked encoding has already started).
                   controller.enqueue(
                     enc.encode(
                       chunkToSse({
@@ -181,6 +210,10 @@ export function handleChatCompletion({
                 }
                 controller.close();
               }
+            },
+            cancel() {
+              // Release the upstream iterator when the client disconnects.
+              it.return?.();
             },
           });
           return new Response(sse, {

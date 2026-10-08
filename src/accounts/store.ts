@@ -176,20 +176,28 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-  db.pragma('secure_delete = FAST');
+  // F16: secure_delete=ON zeroes out freed pages before reuse. FAST only
+  // zeroes pages in rollback journals; with WAL mode the journal file is
+  // persistent on disk and pages there can linger indefinitely otherwise.
+  // Cost is a measurable (~5-15%) write slowdown, acceptable for this
+  // workload (one row per refresh / quota event).
+  db.pragma('secure_delete = ON');
   db.exec(MIGRATIONS);
   // better-sqlite3 creates data.db-wal and data.db-shm on first write;
   // tighten those to 0o600 too (WAL contains recent row pages, including
   // unencrypted-by-this-layer columns like email/status).
-  for (const sibling of [`${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync(sibling)) {
-      try {
-        chmodSync(sibling, 0o600);
-      } catch {
-        // ignore
+  const chmodSidecars = (): void => {
+    for (const sibling of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (existsSync(sibling)) {
+        try {
+          chmodSync(sibling, 0o600);
+        } catch {
+          // ignore — non-fatal
+        }
       }
     }
-  }
+  };
+  chmodSidecars();
 
   const addAccountStmt = db.prepare(`
     INSERT INTO accounts (email, refresh_token_encrypted, access_token_encrypted, token_expires_at, tier_id, tier_name, onboarded_at, created_at)
@@ -228,7 +236,21 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
 
   return {
     db,
-    close: () => db.close(),
+    close: () => {
+      // F16: checkpoint TRUNCATE before close so the WAL file is folded
+      // into the main DB and the on-disk sidecar is zero-length instead
+      // of holding the last few KB of recent pages. The chmod pass after
+      // the checkpoint re-tightens the freshly-truncated (and therefore
+      // freshly-created) WAL file. F19: also re-chmod for the normal
+      // case where a checkpoint ran without truncation.
+      try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {
+        // ignore — close() must not throw
+      }
+      chmodSidecars();
+      db.close();
+    },
 
     addAccount(args) {
       requireKey();

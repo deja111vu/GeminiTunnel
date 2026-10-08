@@ -57,7 +57,7 @@
   <h1>gemini-tunnel admin</h1>
   <span class="spacer"></span>
   <input id="token" type="password" placeholder="paste admin token (hex64)" autocomplete="off">
-  <button class="act" id="save-token">Save</button>
+  <button class="act" id="save-token">Sign in</button>
 </header>
 <nav>
   <button data-tab="accounts" class="active">Accounts</button>
@@ -85,16 +85,25 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const TOKEN_KEY = 'gemini-tunnel-admin-token';
+// F18: the admin token never lives in localStorage. The user pastes it
+// once on this page; we POST it to /admin/api/login which sets an
+// HttpOnly+Secure+SameSite=Strict cookie. After that, every request
+// authenticates via the cookie (auto-sent) and JS can't read it, so
+// an XSS payload can't walk out with the admin token. Bearer-header
+// auth is also still accepted for curl scripts, but the SPA doesn't
+// use it.
 function authHeaders() {
-  const t = localStorage.getItem(TOKEN_KEY) || $('#token').value.trim();
-  if (t) localStorage.setItem(TOKEN_KEY, t);
-  return { authorization: 'Bearer ' + t, 'content-type': 'application/json' };
+  return { 'content-type': 'application/json' };
 }
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
+  const res = await fetch(path, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) }, credentials: 'same-origin' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    if (res.status === 401 && !path.endsWith('/login')) {
+      // Session expired or never set. Prompt the user to log in again.
+      toast('session expired — sign in', true);
+      $('#token').focus();
+    }
     throw new Error(`${res.status}: ${body.slice(0, 200)}`);
   }
   if (res.status === 204) return null;
@@ -124,12 +133,23 @@ document.querySelectorAll('nav button').forEach((btn) => {
     if (btn.dataset.tab === 'quota') loadQuota();
   });
 });
-$('#save-token').addEventListener('click', () => {
-  localStorage.setItem(TOKEN_KEY, $('#token').value.trim());
-  toast('saved');
-  loadAccounts();
+$('#save-token').addEventListener('click', async () => {
+  const t = $('#token').value.trim();
+  if (!t) { toast('enter the admin token first', true); return; }
+  try {
+    await api('/admin/api/login', { method: 'POST', body: JSON.stringify({ token: t }) });
+    // Drop the in-memory input value — we no longer need it (cookie
+    // is set), and leaving it in the DOM is one DOM-read away from
+    // an XSS exfil.
+    $('#token').value = '';
+    toast('signed in');
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
 });
-$('#token').value = localStorage.getItem(TOKEN_KEY) || '';
+// Allow Enter in the token field to submit.
+$('#token').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#save-token').click();
+});
 
 // Accounts
 async function loadAccounts() {

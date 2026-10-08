@@ -7,7 +7,7 @@ import { logger } from '../../logger.js';
 import { buildAuthorizationUrl } from '../../oauth/flow.js';
 import { addPending } from '../../oauth/state.js';
 import { finalizeLogin, FinalizeError } from '../../oauth/finalize.js';
-import { requireAdmin } from './auth.js';
+import { requireAdmin, setAdminCookie, clearAdminCookie } from './auth.js';
 import type { Store } from '../../accounts/store.js';
 import type { RefresherLike } from '../../accounts/pool.js';
 
@@ -16,6 +16,7 @@ const ExchangeBody = z.object({
   state: z.string().min(1).max(128),
   code: z.string().min(1).max(4096),
 });
+const LoginBody = z.object({ token: z.string().min(1).max(256) });
 
 export interface AdminApiDeps {
   app: Hono;
@@ -32,6 +33,27 @@ export function handleAdminApi({
   encryptionKey,
   adminToken,
 }: AdminApiDeps): void {
+  // Login + logout are NOT under requireAdmin — they're how the user
+  // gets a session in the first place. We register them before the
+  // `/admin/api/*` guard so the guard doesn't 401 its own bootstrap.
+  app.post('/admin/api/login', async (c) => {
+    const raw = await c.req.json().catch(() => null);
+    const parsed = LoginBody.safeParse(raw);
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    if (!setAdminCookie(c, adminToken, parsed.data.token)) {
+      // Don't differentiate "bad token" from "missing token" at the
+      // status level — both are 401. The body just says unauthorized
+      // either way, no oracle.
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+    return c.json({ ok: true });
+  });
+
+  app.post('/admin/api/logout', (c) => {
+    clearAdminCookie(c);
+    return c.body(null, 204);
+  });
+
   app.use('/admin/api/*', requireAdmin(adminToken));
 
   // List accounts. Never returns raw tokens — only the metadata + a boolean
@@ -157,6 +179,22 @@ export function serveAdminUi(app: Hono, opts: ServeAdminUiOptions = {}): void {
     );
   }
   const html = readFileSync(htmlPath, 'utf8');
-  app.get('/admin', (c) => c.html(html));
-  app.get('/admin/', (c) => c.html(html));
+  // Defense-in-depth: the SPA is server-rendered HTML but it can still
+  // be iframed, embedded, or replayed through a browser cache. These
+  // headers fail closed against clickjacking, MIME sniffing, and stale
+  // auth tokens sitting in shared caches. No CSP was added yet (the
+  // SPA ships inline JSON state that would need a hash); tracked as
+  // future work.
+  const securityHeaders: Record<string, string> = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store',
+  };
+  const sendHtml = (c: import('hono').Context): Response => {
+    for (const [k, v] of Object.entries(securityHeaders)) c.header(k, v);
+    return c.html(html);
+  };
+  app.get('/admin', sendHtml);
+  app.get('/admin/', sendHtml);
 }

@@ -249,4 +249,70 @@ describe('handleChatCompletion', () => {
       rmSync(fx.tmp, { recursive: true, force: true });
     }
   });
+
+  it('streaming: surfaces upstream 429 as 429 + JSON, not 200 + SSE error chunk (F6)', async () => {
+    // F6: before returning a 200 + ReadableStream, the chat handler
+    // pulls the first chunk from the upstream iterator. An upstream
+    // error that arrives before any chunk therefore becomes the HTTP
+    // status, matching what OpenAI clients (and their retry middleware)
+    // actually inspect.
+    const fx = makeFixture();
+    try {
+      fetchMock.mockResolvedValueOnce(new Response('rate-limited', { status: 429 }));
+      const app = makeApp(fx.pool, fx.store, fetchMock as unknown as typeof fetch);
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'm',
+          stream: true,
+          messages: [{ role: 'user', content: 'q' }],
+        }),
+      });
+      // The switch budget (3) gets us through 3 different 429s before
+      // returning 500 (no eligible account), and the FIRST account is
+      // marked rate-limited (cooldown set). The contract is: the client
+      // never gets a 200 with a trailing error SSE event.
+      expect(res.status).not.toBe(200);
+      const ct = res.headers.get('content-type') ?? '';
+      // JSON body, not text/event-stream — the switch path returns
+      // a c.json() shape.
+      expect(ct).toMatch(/application\/json/);
+    } finally {
+      fx.store.close();
+      rmSync(fx.tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('streaming: success path returns 200 + text/event-stream with the first chunk pre-emitted', async () => {
+    // F6 sanity: when the upstream IS successful, the same first-chunk
+    // pull should leave the body shape unchanged — a normal SSE stream.
+    const fx = makeFixture();
+    try {
+      fetchMock.mockResolvedValueOnce(
+        new Response(sseEvent('hello', 'STOP'), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+      const app = makeApp(fx.pool, fx.store, fetchMock as unknown as typeof fetch);
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'm',
+          stream: true,
+          messages: [{ role: 'user', content: 'q' }],
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toMatch(/text\/event-stream/);
+      const text = await res.text();
+      expect(text).toContain('"object":"chat.completion.chunk"');
+      expect(text).toContain('hello');
+    } finally {
+      fx.store.close();
+      rmSync(fx.tmp, { recursive: true, force: true });
+    }
+  });
 });

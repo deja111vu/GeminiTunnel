@@ -3,7 +3,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 const REQUIRED_ENV = {
   ADMIN_TOKEN: 'a'.repeat(64),
   ACCOUNTS_ENCRYPTION_KEY: 'b'.repeat(64),
-  GOOGLE_OAUTH_CLIENT_SECRET: 'dummy',
+  // Real GOCSPX- secrets are ~35 chars; 25 here passes the min-20 +
+  // placeholder check without using the literal "GOCSPX-" prefix (which
+  // is reserved for real Google-issued values).
+  GOOGLE_OAUTH_CLIENT_SECRET: 'GOCSPX-FAKE-TEST-SECRET-1234567890',
 };
 
 describe('config', () => {

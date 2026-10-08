@@ -52,13 +52,26 @@ export class TokenRefresher {
       const { credentials } = await client.refreshAccessToken();
       if (!credentials.access_token) throw new Error('no access_token from refresh');
       const expiresAt = credentials.expiry_date ?? Date.now() + 55 * 60 * 1000;
-      this.store.setActiveToken(accountId, credentials.access_token, expiresAt);
-      if (credentials.refresh_token && credentials.refresh_token !== refreshToken) {
-        const stmt = this.store.db.prepare(
-          'UPDATE accounts SET refresh_token_encrypted=? WHERE id=?',
-        );
-        stmt.run(encrypt(credentials.refresh_token, this.encryptionKey), accountId);
-      }
+      // Atomic: new access_token + (optional) rotated refresh_token
+      // must commit together. Google rotates refresh_tokens server-side
+      // and the old one becomes invalid on first use; a SIGKILL between
+      // the two UPDATEs would leave the new access_token in the DB but
+      // the old refresh_token still in storage, and the next refresh
+      // would fail with invalid_grant. The pool's recordRateLimit path
+      // (src/accounts/pool.ts) already uses the same pattern.
+      const rotateRt =
+        credentials.refresh_token && credentials.refresh_token !== refreshToken
+          ? encrypt(credentials.refresh_token, this.encryptionKey)
+          : null;
+      const txn = this.store.db.transaction(() => {
+        this.store.setActiveToken(accountId, credentials.access_token!, expiresAt);
+        if (rotateRt !== null) {
+          this.store.db
+            .prepare('UPDATE accounts SET refresh_token_encrypted=? WHERE id=?')
+            .run(rotateRt, accountId);
+        }
+      });
+      txn();
       logger.info({ accountId, email: acc.email }, 'refreshed access_token');
       return credentials.access_token;
     } catch (err) {
