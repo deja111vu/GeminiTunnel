@@ -79,6 +79,36 @@ describe('AccountPool', () => {
     expect(pick.accountId).toBe(active.id);
   });
 
+  it('rotates accounts even when lastUsedAt is identical (LRU tie-break)', async () => {
+    // Verifies the in-memory seq tie-break: with Date.now() too coarse to
+    // distinguish back-to-back touches, the pool must still hand out a
+    // different account on each pick.
+    const a = makeAccount('a@e.com', 0);
+    const b = makeAccount('b@e.com', 0);
+    const c = makeAccount('c@e.com', 0);
+    const same = Date.now();
+    store.db
+      .prepare('UPDATE accounts SET last_used_at=? WHERE id IN (?,?,?)')
+      .run(same, a.id, b.id, c.id);
+    const pool = new AccountPool({ store, refresher: mockRefresher(), cooldownMs: 60_000 });
+    const ids = new Set<number>();
+    for (let i = 0; i < 3; i++) {
+      const { accountId } = await pool.pick();
+      ids.add(accountId);
+    }
+    expect(ids).toEqual(new Set([a.id, b.id, c.id]));
+  });
+
+  it('aggregates refresh errors when all eligible accounts fail', async () => {
+    makeAccount('a@e.com', 30_000);
+    makeAccount('b@e.com', 20_000);
+    const ref = mockRefresher(async () => {
+      throw new Error('invalid_grant: revoked');
+    });
+    const pool = new AccountPool({ store, refresher: ref, cooldownMs: 60_000 });
+    await expect(pool.pick()).rejects.toThrow(/no usable account.*invalid_grant/s);
+  });
+
   it('round-robins: each pick rotates to a different account', async () => {
     const a = makeAccount('a@e.com', 30_000);
     const b = makeAccount('b@e.com', 20_000);

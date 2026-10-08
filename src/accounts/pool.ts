@@ -20,6 +20,12 @@ export class AccountPool {
   private readonly store: Store;
   private readonly refresher: RefresherLike;
   private readonly cooldownMs: number;
+  // Monotonic counter used as a tie-breaker when last_used_at values are
+  // equal (Date.now() resolution is too coarse to distinguish back-to-back
+  // touches on a fast machine; without this, stable sort hands account id=1
+  // to every pick).
+  private nextPickSeq = 0;
+  private readonly pickSeqById = new Map<number, number>();
 
   constructor({ store, refresher, cooldownMs }: AccountPoolOptions) {
     this.store = store;
@@ -29,7 +35,9 @@ export class AccountPool {
 
   // Pick the most-eligible active account.
   // Eligibility: status=active AND (cooldownUntil is null OR cooldownUntil < now).
-  // Tie-breaker: oldest lastUsedAt first (LRU); null counts as oldest.
+  // Tie-breaker: oldest lastUsedAt first (LRU); among equal timestamps,
+  // the account with the smallest in-memory pick seq (i.e. picked least
+  // recently by this pool instance).
   // Falls back to the next candidate if the chosen one throws on token refresh.
   async pick(): Promise<PickedAccount> {
     const now = Date.now();
@@ -40,34 +48,28 @@ export class AccountPool {
       .sort((a, b) => {
         const at = a.lastUsedAt ?? 0;
         const bt = b.lastUsedAt ?? 0;
-        // null/0 sort as oldest; among non-null, smaller timestamp first.
-        if (at === 0 && bt === 0) return a.id - b.id;
-        if (at === 0) return -1;
-        if (bt === 0) return 1;
-        return at - bt;
+        if (at !== bt) return at - bt;
+        return (this.pickSeqById.get(a.id) ?? 0) - (this.pickSeqById.get(b.id) ?? 0);
       });
 
     if (eligible.length === 0) {
       throw new Error('no active account available (all on cooldown, invalid, or ineligible)');
     }
 
-    let lastErr: unknown;
+    const errors: string[] = [];
     for (const acc of eligible) {
       try {
         const token = await this.refresher.getAccessToken(acc.id);
-        // Mark as used so the next pick rotates to a different account.
-        // ponytail: caller can also call recordSuccess() for an explicit
-        // success marker; we touch here so pick() is self-contained.
+        const seq = this.nextPickSeq++;
+        this.pickSeqById.set(acc.id, seq);
         this.store.touchUsed(acc.id);
         return { accountId: acc.id, email: acc.email, token };
       } catch (err) {
         // Token refresh marks the account invalid inside the refresher; try the next.
-        lastErr = err;
+        errors.push(err instanceof Error ? err.message : String(err));
       }
     }
-    throw new Error(
-      `no usable account: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
-    );
+    throw new Error(`no usable account: ${errors.join(' | ')}`);
   }
 
   recordSuccess(accountId: number): void {
@@ -80,8 +82,13 @@ export class AccountPool {
 
   recordRateLimit(accountId: number, model: string, durationMs?: number): void {
     const until = Date.now() + (durationMs ?? this.cooldownMs);
-    this.store.setCooldown(accountId, until);
-    this.store.recordQuotaEvent(accountId, model, '429', until);
+    // Atomic: cooldown + event must commit together so the Phase 8 quota UI
+    // and the cooldown protection can't disagree on what happened.
+    const txn = this.store.db.transaction(() => {
+      this.store.setCooldown(accountId, until);
+      this.store.recordQuotaEvent(accountId, model, '429', until);
+    });
+    txn();
   }
 
   recordInvalid(accountId: number, lastError?: string): void {
