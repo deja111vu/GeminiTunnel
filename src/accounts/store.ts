@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { encrypt as enc, decrypt as dec } from './encryption.js';
 
@@ -152,11 +152,21 @@ export interface Store {
 }
 
 export function createStore(dataDir: string, encryptionKeyHex: string = ''): Store {
-  mkdirSync(dataDir, { recursive: true });
+  // Restrictive permissions: data dir 0700, db file 0600.
+  // On Windows these are no-ops for NTFS DACLs; the data dir is expected to
+  // live under the user's profile.
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const dbPath = path.join(dataDir, 'data.db');
+  try {
+    const fd = openSync(dbPath, 'a+', 0o600);
+    closeSync(fd);
+  } catch {
+    // ignore — file may already exist with different perms
+  }
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('secure_delete = FAST');
   db.exec(MIGRATIONS);
 
   const addAccountStmt = db.prepare(`
