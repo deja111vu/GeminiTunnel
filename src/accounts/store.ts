@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdirSync, openSync, closeSync } from 'node:fs';
+import { mkdirSync, openSync, closeSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { encrypt as enc, decrypt as dec } from './encryption.js';
 
@@ -152,22 +152,43 @@ export interface Store {
 }
 
 export function createStore(dataDir: string, encryptionKeyHex: string = ''): Store {
-  // Restrictive permissions: data dir 0700, db file 0600.
+  // Restrictive permissions: data dir 0700, db file + WAL/SHM sidecars 0600.
   // On Windows these are no-ops for NTFS DACLs; the data dir is expected to
   // live under the user's profile.
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const dbPath = path.join(dataDir, 'data.db');
   try {
+    // 'a+' creates if missing (applying the mode) and opens if existing; we
+    // re-chmod below to cover the existing-file case.
     const fd = openSync(dbPath, 'a+', 0o600);
     closeSync(fd);
   } catch {
-    // ignore — file may already exist with different perms
+    // file system refused to open — let better-sqlite3 surface the error
+  }
+  // Re-apply 0o600 unconditionally: covers both the just-created case and
+  // pre-existing files from an earlier deployment with looser perms.
+  try {
+    chmodSync(dbPath, 0o600);
+  } catch {
+    // ignore — non-fatal, but log-worthy
   }
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('secure_delete = FAST');
   db.exec(MIGRATIONS);
+  // better-sqlite3 creates data.db-wal and data.db-shm on first write;
+  // tighten those to 0o600 too (WAL contains recent row pages, including
+  // unencrypted-by-this-layer columns like email/status).
+  for (const sibling of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(sibling)) {
+      try {
+        chmodSync(sibling, 0o600);
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   const addAccountStmt = db.prepare(`
     INSERT INTO accounts (email, refresh_token_encrypted, access_token_encrypted, token_expires_at, tier_id, tier_name, onboarded_at, created_at)

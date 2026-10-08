@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { createStore } from './store.js';
@@ -25,6 +25,20 @@ describe('store schema', () => {
     expect(names).toContain('account_quota_events');
     expect(names).toContain('account_quota_snapshots');
     store.close();
+  });
+
+  // Unix permission bits are no-ops on Windows NTFS, so this guard keeps the
+  // suite green on Windows while still asserting on Linux/macOS deploys.
+  const itIfUnix = process.platform === 'win32' ? it.skip : it;
+
+  itIfUnix('applies 0o700 to data dir and 0o600 to data.db', () => {
+    const store = createStore(tmp, KEY);
+    store.addAccount({ email: 'p@e.com', refreshToken: 'rt' });
+    store.close();
+    const dirMode = statSync(tmp).mode & 0o777;
+    const dbMode = statSync(path.join(tmp, 'data.db')).mode & 0o777;
+    expect(dirMode).toBe(0o700);
+    expect(dbMode).toBe(0o600);
   });
 });
 
