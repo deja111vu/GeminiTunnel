@@ -83,6 +83,35 @@ describe('server', () => {
     expect(res.status).toBe(411);
   });
 
+  // bodyCap is mounted on /v1/* and /admin/api/*, and gates every
+  // method that conventionally carries a request body. Each method
+  // is tested for the same invariant — a future refactor that
+  // silently drops one of these methods from the gate MUST be caught
+  // by these tests, not by a 3am OOM page.
+  for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
+    it(`rejects ${method} with missing Content-Length to /v1/* with 411`, async () => {
+      const app = createApp();
+      const res = await app.request('/v1/chat/completions', {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: '',
+      });
+      expect(res.status).toBe(411);
+    });
+  }
+
+  for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
+    it(`rejects ${method} with oversize body to /admin/api/* with 413`, async () => {
+      const app = createApp();
+      const res = await app.request('/admin/api/login', {
+        method,
+        headers: { 'content-type': 'application/json', 'content-length': String(5 * 1024 * 1024) },
+        body: '{}',
+      });
+      expect(res.status).toBe(413);
+    });
+  }
+
   it('?key=AIza... is rejected in OAuth-only mode (no keyPool wired)', async () => {
     // F3 invariant: a well-formed AIza in the URL must 400 even when
     // the dispatcher is not registered (OAuth-only deployment). The
