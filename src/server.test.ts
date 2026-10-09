@@ -98,4 +98,33 @@ describe('server', () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('key_in_query_string_forbidden');
   });
+
+  it('?KEY=AIza... (uppercase) is also rejected — case-sensitivity regression', async () => {
+    // URLSearchParams.get('key') is case-sensitive, so a naive
+    // `get('key')` check would let `?KEY=AIza…` through. The edge
+    // guard scans every value with KEY_RE, regardless of name, so the
+    // bypass is closed.
+    const app = createApp();
+    const res = await app.request(`/v1/chat/completions?KEY=${K1}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': '2' },
+      body: '{}',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('key_in_query_string_forbidden');
+  });
+
+  it('?api_key=AIza... is also rejected — arbitrary parameter names', async () => {
+    // Same bypass class, different name. The guard matches on VALUE.
+    const app = createApp();
+    const res = await app.request(`/v1/chat/completions?api_key=${K1}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': '2' },
+      body: '{}',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('key_in_query_string_forbidden');
+  });
 });

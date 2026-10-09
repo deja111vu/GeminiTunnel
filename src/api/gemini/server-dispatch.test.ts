@@ -91,21 +91,12 @@ describe('keyOrOAuth middleware', () => {
     expect(body.error).toBe('bad_api_key_format');
   });
 
-  it('?key=AIza... → 400 key_in_query_string_forbidden', async () => {
-    const app = makeApp({ enabled: true });
-    const res = await app.request(`/v1/chat/completions?key=${K1}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{}',
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('key_in_query_string_forbidden');
-  });
-
   it('?key=invalid → next() (no rejection, falls through to OAuth)', async () => {
     // Only well-formed AIza keys are rejected from the query string. A
     // random `?key=foo` is not a security issue and should not 400.
+    // The well-formed `?key=AIza…` rejection is enforced by
+    // `rejectKeyInQuery` in src/server.ts, NOT by this middleware —
+    // see src/server.test.ts for the edge-guard tests.
     const app = makeApp({ enabled: true });
     const res = await app.request('/v1/chat/completions?key=foo', {
       method: 'POST',
@@ -139,20 +130,6 @@ describe('keyOrOAuth middleware', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('key_path_disabled');
-  });
-
-  it('enabled=false, ?key=AIza... → still 400 key_in_query_string_forbidden', async () => {
-    // The query-string check fires regardless of `enabled`; a key in the
-    // URL is a security risk even if the path that would use it is off.
-    const app = makeApp({ enabled: false });
-    const res = await app.request(`/v1/chat/completions?key=${K1}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{}',
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('key_in_query_string_forbidden');
   });
 
   describe('clientAuth → keyOrOAuth ordering', () => {

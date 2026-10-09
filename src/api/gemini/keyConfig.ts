@@ -44,3 +44,31 @@ export function parseApiKeys(envValue: string | undefined): readonly string[] {
 export function keyIdFor(key: string): string {
   return createHash('sha256').update(key).digest('hex').slice(0, 8);
 }
+
+// True iff `value` looks like a well-formed Google API key. Public
+// (the regex is also exported as KEY_RE) — by design, the format is
+// not a secret. Used to reject keys in query strings and other
+// untrusted locations where the parameter name cannot be trusted
+// (clients may use `?key=`, `?KEY=`, `?api_key=`, etc. — and the
+// NAME is case-sensitive in URLSearchParams, so we match on VALUE).
+export function looksLikeApiKey(value: string): boolean {
+  return KEY_RE.test(value);
+}
+
+// Returns the first query-string value that matches a well-formed
+// AIza-shaped key, regardless of the parameter name. Used by the
+// edge guard that rejects `?key=AIza…` before it can leak into
+// access logs / browser history / referer headers.
+//
+// Case-insensitive on the parameter NAME side would require either
+// iterating the spec implementation or normalising the query string
+// ourselves. The cheaper, safer choice is: trust nothing about the
+// name, scan every value with KEY_RE. This also catches
+// `?api_key=AIza…` / `?apikey=AIza…` / any other name a client
+// happens to pick.
+export function findAizaInQuery(searchParams: URLSearchParams): string | null {
+  for (const [, value] of searchParams.entries()) {
+    if (KEY_RE.test(value)) return value;
+  }
+  return null;
+}

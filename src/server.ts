@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { timingSafeEqual } from 'node:crypto';
-import { KEY_RE } from './api/gemini/keyConfig.js';
+import { findAizaInQuery } from './api/gemini/keyConfig.js';
 import { keyOrOAuth } from './api/gemini/middleware.js';
 import type { KeyClient } from './api/gemini/keyClient.js';
 import type { KeyPool } from './api/gemini/keyPool.js';
@@ -23,14 +23,19 @@ const BEARER_RE = /^Bearer\s+(.+)$/;
 // rejection fires even in OAuth-only deployments. A `?key=AIza…` in a
 // request URL is logged by every reverse proxy, CDN, and browser in
 // the path; the proxy must 400 it before any of those see the response
-// path. By design, only well-formed AIza values are rejected; a
-// truncated or random `?key=foo` falls through (the regex is public,
-// and shorter prefixes carry no information).
+// path.
+//
+// We match on VALUE, not on parameter name. URLSearchParams.get('key')
+// is case-sensitive (?KEY=AIza… bypasses it), and clients pick whatever
+// name they like (?api_key=, ?apikey=, …). The KEY_RE format is
+// public, so scanning every value carries no information leak; the
+// upside is that no well-formed AIza can sneak through regardless of
+// how the client named the parameter.
 function rejectKeyInQuery() {
   return async (c: import('hono').Context, next: import('hono').Next): Promise<Response | void> => {
     const url = new URL(c.req.url);
-    const queryKey = url.searchParams.get('key');
-    if (queryKey !== null && KEY_RE.test(queryKey)) {
+    const aiza = findAizaInQuery(url.searchParams);
+    if (aiza !== null) {
       return c.json({ error: 'key_in_query_string_forbidden' }, 400);
     }
     return next();
@@ -40,8 +45,10 @@ function rejectKeyInQuery() {
 // Reusable body-cap middleware. Mounted on /v1/* (auth-required) and
 // /admin/api/* (login is unauthenticated, so it MUST also be capped).
 // We only trust Content-Length when it's a valid number; chunked
-// transfer encoding is rejected on POST so an attacker can't hide a
-// giant body behind missing length.
+// transfer encoding is rejected on any method that has a body
+// (POST/PUT/PATCH/DELETE) so an attacker can't hide a giant body
+// behind missing length. GET/HEAD/OPTIONS always lack a body and
+// are passed through untouched.
 function bodyCap(c: import('hono').Context, next: import('hono').Next): Promise<Response> | Promise<void> {
   const cl = c.req.header('content-length');
   if (cl !== undefined) {
@@ -52,7 +59,7 @@ function bodyCap(c: import('hono').Context, next: import('hono').Next): Promise<
     if (n > MAX_BODY_BYTES) {
       return Promise.resolve(c.json({ error: 'body_too_large', limit: MAX_BODY_BYTES }, 413));
     }
-  } else if (c.req.method === 'POST') {
+  } else if (c.req.method === 'POST' || c.req.method === 'PUT' || c.req.method === 'PATCH' || c.req.method === 'DELETE') {
     return Promise.resolve(c.json({ error: 'content_length_required' }, 411));
   }
   return next();

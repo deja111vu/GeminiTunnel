@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { parseApiKeys, KEY_RE, keyIdFor } from './keyConfig.js';
+import { parseApiKeys, KEY_RE, keyIdFor, findAizaInQuery, looksLikeApiKey } from './keyConfig.js';
 
 // A valid Google API key is 43 chars total: "AIza" + 39 chars of [a-zA-Z0-9_-].
 const VALID = 'AIzaSyA' + 'a'.repeat(36); // 7 + 36 = 43
@@ -95,6 +95,73 @@ describe('keyIdFor', () => {
   it('differs across distinct keys', () => {
     const K2 = 'AIzaSyB' + 'b'.repeat(36);
     expect(keyIdFor(K)).not.toBe(keyIdFor(K2));
+  });
+});
+
+describe('looksLikeApiKey', () => {
+  // Edge guard against AIza-shaped values in untrusted inputs. Used by
+  // findAizaInQuery to scan query-string values regardless of parameter
+  // name. Public on purpose — KEY_RE is also exported.
+  const K = 'AIzaSyA' + 'a'.repeat(36);
+
+  it('accepts a well-formed key', () => {
+    expect(looksLikeApiKey(K)).toBe(true);
+  });
+
+  it('rejects a truncated key (the F3 invariant: only well-formed keys are blocked)', () => {
+    expect(looksLikeApiKey('AIza')).toBe(false);
+    expect(looksLikeApiKey(K.slice(0, 10))).toBe(false);
+  });
+
+  it('rejects non-key strings', () => {
+    expect(looksLikeApiKey('')).toBe(false);
+    expect(looksLikeApiKey('not-a-key')).toBe(false);
+    expect(looksLikeApiKey('sk-abcdefghijklmnopqrstuvwxyz0123456789')).toBe(false);
+  });
+});
+
+describe('findAizaInQuery', () => {
+  // The F3 edge guard. URLSearchParams.get('key') is case-sensitive on
+  // the parameter name, so `?KEY=AIza…` bypasses a naive `get('key')`
+  // check. We must match on VALUE, scanning every parameter.
+  const K = 'AIzaSyA' + 'a'.repeat(36);
+  const K2 = 'AIzaSyB' + 'b'.repeat(36);
+
+  it('returns the AIza value when present under the conventional `key` name', () => {
+    const p = new URLSearchParams(`key=${K}`);
+    expect(findAizaInQuery(p)).toBe(K);
+  });
+
+  it('returns the AIza value when the parameter name has different casing (?KEY=)', () => {
+    // F3 case-sensitivity regression: this used to return null because
+    // URLSearchParams.get('key') is case-sensitive.
+    const p = new URLSearchParams(`KEY=${K}`);
+    expect(findAizaInQuery(p)).toBe(K);
+  });
+
+  it('returns the AIza value under arbitrary parameter names (?api_key=, ?apikey=)', () => {
+    expect(findAizaInQuery(new URLSearchParams(`api_key=${K}`))).toBe(K);
+    expect(findAizaInQuery(new URLSearchParams(`apikey=${K}`))).toBe(K);
+    expect(findAizaInQuery(new URLSearchParams(`token=${K}`))).toBe(K);
+  });
+
+  it('returns null when no value matches the AIza format', () => {
+    expect(findAizaInQuery(new URLSearchParams('key=foo'))).toBeNull();
+    expect(findAizaInQuery(new URLSearchParams('key=AIza'))).toBeNull();
+    expect(findAizaInQuery(new URLSearchParams())).toBeNull();
+    expect(findAizaInQuery(new URLSearchParams('page=2&limit=10'))).toBeNull();
+  });
+
+  it('ignores non-AIza values when a real key is also present', () => {
+    // Mixed bag: a page counter, a fake key, and a real key. Returns
+    // the real one (whichever is found first).
+    const p = new URLSearchParams(`page=1&key=fake&apikey=${K}`);
+    expect(findAizaInQuery(p)).toBe(K);
+  });
+
+  it('returns the first AIza match when multiple are present', () => {
+    const p = new URLSearchParams(`key=${K}&api_key=${K2}`);
+    expect(findAizaInQuery(p)).toBe(K);
   });
 });
 

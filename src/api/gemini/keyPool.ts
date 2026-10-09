@@ -148,10 +148,17 @@ export class KeyPool {
     // a 429 on each request with a unique `model` string would grow the
     // Map without limit. Evict the entry with the smallest `until` (i.e.
     // the one that would expire soonest anyway) until we're under the cap.
+    //
+    // Skip the just-inserted `model` when picking a victim: a small
+    // durationMs (e.g. a 1s Retry-After from upstream) can produce a
+    // `newUntil` that is the smallest in the Map, and evicting the
+    // record we just wrote would silently drop the 429 signal and
+    // let `pick('thatModel')` return the same key on the next request.
     while (m.size > this.maxModelsPerKey) {
       let victimKey: string | null = null;
       let victimUntil = Number.POSITIVE_INFINITY;
       for (const [mk, mu] of m) {
+        if (mk === model) continue;
         if (mu < victimUntil) {
           victimUntil = mu;
           victimKey = mk;

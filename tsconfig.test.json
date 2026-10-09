@@ -4,6 +4,12 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["test/**/*"],
+  // Type-check Vitest specs (test/**) AND the .test.ts/.spec.ts files
+  // that live next to the source they exercise. The main tsconfig
+  // excludes the test files so the production dist does not include
+  // them (Dockerfile does a belt-and-suspenders sweep), but tsc must
+  // still type-check them — otherwise a typo in a test passes lint
+  // and only fails at runtime.
+  "include": ["test/**/*", "src/**/*.test.ts", "src/**/*.spec.ts"],
   "exclude": ["node_modules", "dist"]
 }

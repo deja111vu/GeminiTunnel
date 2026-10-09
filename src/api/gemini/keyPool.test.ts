@@ -257,4 +257,55 @@ describe('KeyPool', () => {
     // Should still be on cooldown
     expect(p.pick('gemini-2.5-pro').key).toBe(K2);
   });
+
+  it('recordRateLimit не вытесняет только что вставленную запись, даже если её until меньше всех (LRU-эвикция regression)', () => {
+    // Cap = 2. Заполняем двумя записями с большим until. Третий вызов
+    // с durationMs=10 (например, Retry-After=1s от upstream) даёт
+    // новой записи until=t+10, который МЕНЬШЕ уже существующих. До
+    // фикса эвикция выбирала жертву по всему Map и удаляла именно
+    // новую запись → 429-сигнал для `modelC` терялся → `pick` снова
+    // выдавал тот же ключ → DoS-амплификация при малом N ключей.
+    const p = new KeyPool({
+      keys: [K1, K2],
+      cooldownMs: 60_000,
+      badTtlMs: 86_400_000,
+      jitterMs: 0,
+      maxModelsPerKey: 2,
+      now: () => now,
+    });
+    p.recordRateLimit(K1, 'modelA', 60_000); // until = t+60_000
+    p.recordRateLimit(K1, 'modelB', 60_000); // until = t+60_000; map size = 2
+    now += 5_000;
+    p.recordRateLimit(K1, 'modelC', 10); // until = t+10; map size=3 → должна сработать эвикция
+    // modelC должна быть в Map. pick('modelC') обязан исключить K1.
+    now += 1;
+    expect(p.pick('modelC').key).toBe(K2);
+  });
+
+  it('recordRateLimit при переполнении вытесняет старейшую запись по min(until), а не новую', () => {
+    // Cap = 2. Три записи с убывающим until: modelA — старая (until=t+5),
+    // modelB — новая (until=t+50), modelC — самая новая (until=t+100).
+    // Вставка modelC должна вытеснить modelA (min until), а modelB
+    // остаётся.
+    const p = new KeyPool({
+      keys: [K1, K2, K3],
+      cooldownMs: 60_000,
+      badTtlMs: 86_400_000,
+      jitterMs: 0,
+      maxModelsPerKey: 2,
+      now: () => now,
+    });
+    p.recordRateLimit(K1, 'modelA', 5); // until = t+5
+    p.recordRateLimit(K1, 'modelB', 50); // until = t+50; size=2
+    p.recordRateLimit(K1, 'modelC', 100); // until = t+100; size=3 → evict modelA
+    // modelA истёк (until=t+5 < now+1), modelB жив (until=t+50),
+    // modelC жив (until=t+100). Только modelB и modelC должны быть
+    // учтены в вытеснении — modelA уже ушла по времени.
+    now += 1;
+    // pick('modelA') — должно сработать (until истёк) → K1 доступен
+    expect(p.pick('modelA').key).toBe(K1);
+    // pick('modelB') и pick('modelC') — K1 на cooldown
+    expect(p.pick('modelB').key).not.toBe(K1);
+    expect(p.pick('modelC').key).not.toBe(K1);
+  });
 });
