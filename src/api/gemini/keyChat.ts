@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { logger } from '../../logger.js';
 import { HttpError } from '../codeassist/client.js';
 import { KeyClient, UpstreamMisconfiguredError } from './keyClient.js';
+import { keyIdFor } from './keyConfig.js';
 import type { KeyPool } from './keyPool.js';
 import type { Config } from '../../config.js';
 
@@ -126,7 +127,7 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
             lastFatalStatus = 502;
             break;
           }
-          logger.warn({ err: (err as Error).message, keySuffix: picked.key.slice(-4) }, 'stream first-chunk error');
+          logger.warn({ err: (err as Error).message, keyId: keyIdFor(picked.key) }, 'stream first-chunk error');
           continue;
         }
         if (first.done) {
@@ -166,7 +167,7 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
             } catch (err) {
               if (err instanceof HttpError) upstreamErr = err;
               logger.warn(
-                { err: (err as Error).message, keySuffix: picked.key.slice(-4) },
+                { err: (err as Error).message, keyId: keyIdFor(picked.key) },
                 'stream interrupted',
               );
             } finally {
@@ -206,7 +207,7 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
       // Try the next key. The budget-exhausted fallback below maps this
       // to 502.
       logger.warn(
-        { err: (err as Error).message, keySuffix: picked.key.slice(-4) },
+        { err: (err as Error).message, keyId: keyIdFor(picked.key) },
         'upstream call failed without status',
       );
       continue;

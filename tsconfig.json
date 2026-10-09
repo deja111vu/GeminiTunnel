@@ -15,5 +15,11 @@
     "sourceMap": false
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "test"]
+  // Exclude test files from the production build. They contain
+  // hardcoded AIza-shaped placeholders (e.g. `AIzaSyA` + 'a'.repeat(36)
+  // in keyConfig.test.ts) which match the production regex; shipping
+  // them in the runtime image makes the image a confusing read for
+  // anyone grepping the filesystem. Vitest compiles them on the fly
+  // via esbuild — `tsc` does not need to emit them.
+  "exclude": ["node_modules", "dist", "test", "src/**/*.test.ts", "src/**/*.spec.ts"]
 }

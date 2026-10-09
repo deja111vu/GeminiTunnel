@@ -1,9 +1,121 @@
+<!-- markdownlint-disable MD024 -->
+
 # Changelog
 
 All notable changes to gemini-tunnel are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.1.0] - 2026-10-09
+
+Параллельный с OAuth путь для **Google Gemini API key**
+([aistudio.google.com/apikey](https://aistudio.google.com/apikey)). Без
+OAuth, без браузерного логина, без хранилища refresh-токенов — только
+ключи из `GEMINI_API_KEYS`.
+
+### Added — Key path
+
+- **`GEMINI_API_KEYS`** — CSV из AIza-ключей в `.env`. Пусто или не
+  задано — поведение прокси идентично 2.0.0 (только OAuth). Когда
+  задано — параллельно работает второй путь, диспетчер выбирает
+  между ним и OAuth по заголовку `x-goog-api-key: AIza…`.
+- **`KeyPool`** — round-robin по ключам с монотонным seq-тай-брейком,
+  per-model cooldown после 429, per-key «bad» состояние с TTL
+  после 401/403/404, startup jitter (0–30 с) для распределения
+  холодного старта между репликами.
+- **`KeyClient`** — fetch-обёртка для OpenAI-совместимого endpoint
+  `/v1beta/openai/chat/completions`. `Authorization: Bearer <key>` per
+  OpenAI-compat spec. Корректная отмена через `AbortSignal` (слушатель
+  в `streamChat` вызывает `reader.cancel()` — `it.return?.()` не
+  прерывает `await reader.read()`).
+- **`runKeyChat`** — `bodyCap → clientAuth → keyOrOAuth → route`. F6
+  first-chunk pull: первый SSE-чанк прочитывается до отправки
+  клиенту, чтобы upstream 4xx/5xx не превращался в 200 + trailing
+  error chunk. `clearCooldown` вызывается после первого успешного
+  чанка, чтобы per-model cooldown не отравил ключ при живом
+  ответе.
+- **`NoKeyAvailableError(reason, retryAfterMs)`** — типизированный
+  ответ от `KeyPool.pick()` с минимальным cooldown/bad-expiry по пулу;
+  транслируется в 503 + `Retry-After`.
+- **KEY_RE** — единственный regex `/^AIza[a-zA-Z0-9_-]{39}$/`
+  экспортируется из `keyConfig.ts`; `middleware.ts` его импортирует
+  (без дрифта). Drift-тесты пинят форму regex по трём местам
+  (keyConfig, middleware, config).
+- **`/health`** расширен: при наличии `keyPool` отвечает
+  `{status, service, upstreams: {oauth, apiKey}}` со сводкой
+  размера пула и счётчиками bad/cooldown. `summaryForAllModels()`
+  агрегирует состояние по всем ключам.
+- **`UpstreamMisconfiguredError`** — типизированный класс для
+  случаев «upstream вернул не то, что мы умеем обработать»
+  (например, `Content-Type: application/json` от стрим-эндпоинта).
+  Классифицируется как 502 fatal, не 500.
+- **Redact paths** в pino расширены на `*.x-goog-api-key`,
+  `*.X-Goog-Api-Key`, и case-варианты `Authorization`/`Cookie`
+  заголовков. AIza-ключи в логах не появятся.
+- **4 drift-теста** для `KEY_RE` + 7 unit-тестов на middleware
+  диспетчер (валидный/невалидный заголовок, query string, fall-through,
+  ordering с clientAuth).
+
+### Changed
+
+- **`/v1/chat/completions` dispatch** — добавлен `keyOrOAuth`
+  middleware между `bodyCap` и существующим OAuth handler. Клиент
+  выбирает путь заголовком; `Authorization: Bearer AIza…` без
+  `x-goog-api-key` → OAuth (как раньше). `?key=AIza…` в URL →
+  400 `key_in_query_string_forbidden` всегда, даже при выключенном
+  key-пути.
+- **`KeyClient`** использует `config.requestTimeoutMs` (ранее
+  имел свой дефолт). Один таймаут на оба upstream-пути.
+- **`config.ts`** хранит inline-копию KEY_RE, чтобы разорвать цикл
+  module-init (config загружается раньше, чем `src/api/gemini/`);
+  drift-тест пинит её форму.
+- **CHANGELOG** и **README** обновлены.
+
+### Security
+
+- **AIza-ключи не попадают в URL-логи**: `?key=AIza…` всегда 400,
+  в т.ч. при `KEY_PATH_ENABLED=false`. Только well-formed ключи
+  отбиваются на query-строке — случайный `?key=foo` проходит
+  (не security issue, regex публичен).
+- **AbortSignal пробрасывается до upstream** — клиентский disconnect
+  вызывает `reader.cancel()` в `KeyClient.streamChat`, а не только
+  `it.return?.()` (который не прерывает `await reader.read()`).
+  Раньше отмена могла «висеть» до фактического завершения стрима.
+- **First-chunk safety** — `runKeyChat` не отдаёт 200 OK, пока не
+  прочитан хотя бы один байт upstream-ответа; статус-коды
+  401/403/404/408/422/429/5xx приходят как есть, без trailing
+  error chunk. Network failures → 502 (не 500 — внутренняя ошибка
+  нашего кода, а не upstream).
+- **Per-model cooldown** — очищается сразу после первого
+  успешного чанка, не дожидаясь завершения стрима. Иначе
+  «удачливый» ключ мог бы остаться в cooldown пока клиент
+  качает длинный ответ.
+- **`logger.ts`** redacts: добавлены `x-goog-api-key`, `X-Goog-Api-Key`,
+  case-варианты `authorization`/`cookie`. Полный список реэкспортирован
+  из `request.headers.*`, так что любой регистр капса будет
+  замаскирован.
+- **`retriable` флаг** в `upstream_exhausted` — клиент с retry-budget
+  знает, что 4xx retry не поможет (форма запроса неверна), а 5xx /
+  network — стоит повторить.
+
+### Notes
+
+- **OpenAI-совместимый путь** — `/v1beta/openai/chat/completions`
+  принимает `Authorization: Bearer <AIza-key>` (не `x-goog-api-key`).
+  Это per spec, см.
+  [ai.google.dev/gemini-api/docs/openai](https://ai.google.dev/gemini-api/docs/openai).
+  Нативный Gemini API принимает оба варианта, OpenAI-compat — только
+  `Authorization: Bearer`. `x-goog-api-key` оставлен на входе в
+  прокси как client-facing форма для удобства (клиент не должен
+  знать, что прокси внутри переписывает заголовок).
+- **`KEY_PATH_ENABLED`** авто-определяется из `geminiApiKeys.length > 0`.
+  Чтобы **отключить** key-путь при наличии ключей в env, оставьте
+  поле пустым.
+- **Миграция с 2.0.x** — обратно совместимо. `GEMINI_API_KEYS` пуст →
+  прокси ведёт себя ровно как 2.0.0. Никаких breaking changes в
+  контракте `/v1/*` (для OAuth клиентов), `/admin/*`, CLI, или
+  Docker-образа.
 
 ## [2.0.0] - 2026-10-08
 

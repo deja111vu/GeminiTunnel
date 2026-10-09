@@ -16,14 +16,12 @@ describe('server', () => {
     expect(body.service).toBe('gemini-tunnel');
   });
 
-  it('GET /health without keyPool: no apiKey in upstreams', async () => {
-    const app = createApp();
-    const res = await app.request('/health');
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body).not.toHaveProperty('upstreams.apiKey');
-  });
-
-  it('GET /health with keyPool shows apiKey summary', async () => {
+  it('GET /health returns minimal body (no upstreams, no counts)', async () => {
+    // Detailed pool state (configured key count, cooldown/bad counters,
+    // OAuth account counts) is intentionally NOT exposed on /health —
+    // it was a reconnaissance oracle for unauthenticated callers.
+    // Detailed state lives behind the admin UI; the public probe is
+    // just "is the process up?".
     const keyPool = new KeyPool({ keys: [K1], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
     const keyClient = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com' });
     const cfg: Config = {
@@ -35,8 +33,18 @@ describe('server', () => {
     } as Config;
     const app = createApp({ keyPool, keyClient, config: cfg });
     const res = await app.request('/health');
-    const body = (await res.json()) as { upstreams?: { apiKey?: { configured: number } } };
-    expect(body.upstreams?.apiKey?.configured).toBe(1);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ status: 'ok', service: 'gemini-tunnel' });
+    expect(body).not.toHaveProperty('upstreams');
+  });
+
+  it('GET /health in OAuth-only mode (no keyPool): also returns minimal body', async () => {
+    const app = createApp();
+    const res = await app.request('/health');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ status: 'ok', service: 'gemini-tunnel' });
   });
 
   it('rejects oversized POST to /admin/api/* with 413 (F2: login is unauthenticated, must still be capped)', async () => {
@@ -73,5 +81,21 @@ describe('server', () => {
       body: '',
     });
     expect(res.status).toBe(411);
+  });
+
+  it('?key=AIza... is rejected in OAuth-only mode (no keyPool wired)', async () => {
+    // F3 invariant: a well-formed AIza in the URL must 400 even when
+    // the dispatcher is not registered (OAuth-only deployment). The
+    // proxy sits behind nginx/Cloudflare in production — those log the
+    // raw URL, so the 400 must fire before any other handler.
+    const app = createApp();
+    const res = await app.request(`/v1/chat/completions?key=${K1}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': '2' },
+      body: '{}',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('key_in_query_string_forbidden');
   });
 });

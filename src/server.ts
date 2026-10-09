@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { timingSafeEqual } from 'node:crypto';
+import { KEY_RE } from './api/gemini/keyConfig.js';
 import { keyOrOAuth } from './api/gemini/middleware.js';
 import type { KeyClient } from './api/gemini/keyClient.js';
 import type { KeyPool } from './api/gemini/keyPool.js';
@@ -16,6 +17,25 @@ import type { Config } from './config.js';
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 const BEARER_RE = /^Bearer\s+(.+)$/;
+
+// Edge guard against API keys in the query string. Mounted on /v1/*
+// unconditionally — NOT gated on keyPool/keyClient presence — so the
+// rejection fires even in OAuth-only deployments. A `?key=AIza…` in a
+// request URL is logged by every reverse proxy, CDN, and browser in
+// the path; the proxy must 400 it before any of those see the response
+// path. By design, only well-formed AIza values are rejected; a
+// truncated or random `?key=foo` falls through (the regex is public,
+// and shorter prefixes carry no information).
+function rejectKeyInQuery() {
+  return async (c: import('hono').Context, next: import('hono').Next): Promise<Response | void> => {
+    const url = new URL(c.req.url);
+    const queryKey = url.searchParams.get('key');
+    if (queryKey !== null && KEY_RE.test(queryKey)) {
+      return c.json({ error: 'key_in_query_string_forbidden' }, 400);
+    }
+    return next();
+  };
+}
 
 // Reusable body-cap middleware. Mounted on /v1/* (auth-required) and
 // /admin/api/* (login is unauthenticated, so it MUST also be capped).
@@ -99,6 +119,13 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
   const clientAuth = requireClientKey(cfg.clientApiKey);
   app.use('/v1/*', clientAuth);
 
+  // Reject `?key=AIza...` in the query string unconditionally — even
+  // when the key path is disabled. The dispatcher below does the same
+  // for the routes it owns; this guard exists so OAuth-only deployments
+  // (no keyPool/keyClient wired) still get the 400, and so the
+  // rejection runs before any handler that might log the raw URL.
+  app.use('/v1/*', rejectKeyInQuery());
+
   // API-key path dispatcher. Always register when keyPool+keyClient are
   // present, regardless of `keyPathEnabled`, so `?key=AIza...` and
   // malformed headers are rejected with 400 instead of falling through.
@@ -131,21 +158,13 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
     );
   });
 
-  app.get('/health', (c) => {
-    const upstreams: Record<string, unknown> = {};
-    if (deps.pool) {
-      upstreams.oauth = {
-        accounts: deps.store?.listAccounts().length ?? 0,
-        active: deps.pool.countActive(),
-      };
-    }
-    if (deps.keyPool) {
-      upstreams.apiKey = deps.keyPool.summaryForAllModels();
-    }
-    const body: Record<string, unknown> = { status: 'ok', service: 'gemini-tunnel' };
-    if (Object.keys(upstreams).length > 0) body.upstreams = upstreams;
-    return c.json(body);
-  });
+  // /health is intentionally minimal: only `status` and `service`. The
+  // previous `upstreams.{oauth,apiKey}` blocks disclosed pool sizes and
+  // per-pool cooldown/bad counts to any unauthenticated caller that
+  // could reach the endpoint — a reconnaissance oracle for the AIza
+  // key path. Detailed pool state is now in the admin UI (which is
+  // already authenticated) and is not surfaced here.
+  app.get('/health', (c) => c.json({ status: 'ok', service: 'gemini-tunnel' }));
 
   return app;
 }

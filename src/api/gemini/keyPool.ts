@@ -22,6 +22,13 @@ export interface KeyPoolOptions {
   badTtlMs: number;
   jitterMs?: number; // default 30_000
   now?: () => number;
+  // Per-key cap on the number of distinct `model` strings kept in
+  // `cooldownByModel`. Defaults to 1000. Bounded so a caller that
+  // (ab)uses 429 responses to force `recordRateLimit` with unique
+  // model names cannot grow the Map without limit. When the cap is
+  // reached, the entry with the smallest `until` is evicted (i.e. the
+  // one that would have expired soonest anyway).
+  maxModelsPerKey?: number;
 }
 
 export interface PickedKey {
@@ -45,6 +52,7 @@ export class KeyPool {
   private readonly cooldownMs: number;
   private readonly badTtlMs: number;
   private readonly jitterMs: number;
+  private readonly maxModelsPerKey: number;
   private readonly now: () => number;
   // Monotonic counter for round-robin tie-break.
   private nextSeq = 1;
@@ -61,6 +69,7 @@ export class KeyPool {
     this.cooldownMs = opts.cooldownMs;
     this.badTtlMs = opts.badTtlMs;
     this.jitterMs = opts.jitterMs ?? 30_000;
+    this.maxModelsPerKey = opts.maxModelsPerKey ?? 1000;
     this.now = opts.now ?? (() => Date.now());
     if (this.keys.length > 0) {
       this.initJitter();
@@ -135,6 +144,22 @@ export class KeyPool {
     // where Retry-After is the *minimum* remaining time.
     const existing = m.get(model);
     m.set(model, existing !== undefined && existing > newUntil ? existing : newUntil);
+    // Bound the per-key per-model Map. Without this, a caller that forces
+    // a 429 on each request with a unique `model` string would grow the
+    // Map without limit. Evict the entry with the smallest `until` (i.e.
+    // the one that would expire soonest anyway) until we're under the cap.
+    while (m.size > this.maxModelsPerKey) {
+      let victimKey: string | null = null;
+      let victimUntil = Number.POSITIVE_INFINITY;
+      for (const [mk, mu] of m) {
+        if (mu < victimUntil) {
+          victimUntil = mu;
+          victimKey = mk;
+        }
+      }
+      if (victimKey === null) break;
+      m.delete(victimKey);
+    }
   }
 
   clearCooldown(key: string, model: string): void {

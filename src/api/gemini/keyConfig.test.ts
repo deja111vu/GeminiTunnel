@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { parseApiKeys, KEY_RE } from './keyConfig.js';
+import { createHash } from 'node:crypto';
+import { parseApiKeys, KEY_RE, keyIdFor } from './keyConfig.js';
 
 // A valid Google API key is 43 chars total: "AIza" + 39 chars of [a-zA-Z0-9_-].
 const VALID = 'AIzaSyA' + 'a'.repeat(36); // 7 + 36 = 43
@@ -63,6 +64,37 @@ describe('parseApiKeys', () => {
     const a = parseApiKeys(VALID);
     const b = parseApiKeys(VALID);
     expect(a).not.toBe(b); // fresh array each call
+  });
+});
+
+describe('keyIdFor', () => {
+  // Used in place of `key.slice(-4)` for log correlation. The id must
+  // be (a) stable per-key, (b) 8 hex chars, (c) NOT any substring of
+  // the raw key, so a leaked log line gives the operator nothing.
+  const K = 'AIzaSyA' + 'a'.repeat(36);
+
+  it('returns 8 lowercase hex chars', () => {
+    expect(keyIdFor(K)).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('is stable across calls', () => {
+    expect(keyIdFor(K)).toBe(keyIdFor(K));
+  });
+
+  it('matches SHA-256(key).slice(0, 8) (regression: do not change the digest without a deploy plan)', () => {
+    const expected = createHash('sha256').update(K).digest('hex').slice(0, 8);
+    expect(keyIdFor(K)).toBe(expected);
+  });
+
+  it('does NOT include any 4-char tail of the raw key (no fingerprint leak)', () => {
+    const tail = K.slice(-4);
+    expect(keyIdFor(K)).not.toContain(tail);
+    expect(keyIdFor(K)).not.toBe(tail);
+  });
+
+  it('differs across distinct keys', () => {
+    const K2 = 'AIzaSyB' + 'b'.repeat(36);
+    expect(keyIdFor(K)).not.toBe(keyIdFor(K2));
   });
 });
 

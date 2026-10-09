@@ -30,6 +30,12 @@ OpenAI-совместимый прокси для **Google Code Assist / Gemini 
   digest-pinned base image, `npm audit` на build, CycloneDX SBOM.
 - 🪶 **Зависимости** — Node 22, `better-sqlite3`, `hono`, `pino`,
   `google-auth-library`. Никаких внешних сервисов.
+- 🔑 **Gemini API key path (опционально)** — параллельно с OAuth
+  можно подключить прямые AIza-ключи из [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+  Клиент выбирает путь заголовком `x-goog-api-key: AIza…`; без
+  заголовка работает OAuth, как раньше. Round-robin по ключам,
+  per-model cooldown, отмена через AbortSignal. См.
+  [«Gemini API key path»](#-gemini-api-key-path-опционально).
 
 ## 🚀 Быстрый старт
 
@@ -119,6 +125,90 @@ Settings → API Provider → **OpenAI Compatible**:
 Settings → Models → OpenAI API Key:
 - Override OpenAI Base URL: `http://VPS_IP:8000/v1`
 - API Key: `dummy`
+
+## 🔑 Gemini API key path (опционально)
+
+Параллельно с OAuth прокси умеет работать с прямыми ключами
+[Google Gemini API](https://aistudio.google.com/apikey). Полезно,
+когда не хочется логиниться через браузер или держать refresh-токены
+в БД: задал `GEMINI_API_KEYS=AIza…,AIza…` — и готово.
+
+### Что добавить в `.env`
+
+```bash
+# CSV из AIza-ключей. Пусто — key-путь выключен, прокси работает
+# только в OAuth-режиме (поведение 2.0.x).
+GEMINI_API_KEYS=AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,AIzaSyByyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+
+# Cooldown per-key per-model после 429. По умолчанию 60с.
+# KEY_COOLDOWN_AFTER_429_MS=60000
+
+# TTL состояния "bad" для ключа после 401/403/404. По умолчанию 24ч.
+# KEY_BAD_TTL_MS=86400000
+```
+
+### Как подключить клиент
+
+Клиент выбирает путь заголовком. Без заголовка — OAuth, как раньше.
+
+```bash
+# Claude Code с key-путем: передаем AIza-ключ в x-goog-api-key
+curl -X POST http://VPS_IP:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-goog-api-key: AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}'
+```
+
+В OpenAI-клиентах, которые не позволяют задать произвольный заголовок
+(Cline, Cursor, и т.п.), стандартный `api_key` всё равно уходит в
+`Authorization: Bearer …` — прокси этот вариант игнорирует и
+проваливается на OAuth. Для таких клиентов key-путь пока не
+поддержан.
+
+### Как это работает внутри
+
+- **`KeyPool`** — round-robin по ключам, монотонный seq-тай-брейк
+  при равном LRU. Per-model cooldown после 429 (по умолчанию
+  60 с, ключ не выбирается для этой модели, но может выбираться
+  для другой). Per-key «bad» состояние с TTL после 401/403/404
+  (по умолчанию 24 ч). Startup jitter (0–30 с) — чтобы холодный
+  старт нескольких реплик не отправлял все запросы в один ключ.
+- **`KeyClient`** — fetch-обёртка для OpenAI-совместимого endpoint
+  Google (`/v1beta/openai/chat/completions`). Ключ отправляется
+  как `Authorization: Bearer <key>` per
+  [OpenAI-compat spec](https://ai.google.dev/gemini-api/docs/openai).
+  AbortSignal пробрасывается до upstream-ридера: клиентский
+  disconnect вызывает `reader.cancel()` и не висит до конца стрима.
+- **`runKeyChat`** — `bodyCap → clientAuth → keyOrOAuth → route`.
+  First-chunk safety: первый SSE-чанк прочитывается до отправки
+  клиенту, поэтому upstream 4xx/5xx приходит как HTTP-статус, а не
+  как 200 OK + trailing error chunk. Cooldown снимается сразу после
+  первого успешного чанка, не дожидаясь конца стрима.
+- **`/health`** — при включённом key-пути возвращает агрегированную
+  сводку:
+
+  ```json
+  {
+    "status": "ok",
+    "service": "gemini-tunnel",
+    "upstreams": {
+      "oauth": { "pool": 3, "active": 2, "cooldown": 1 },
+      "apiKey": { "pool": 5, "active": 4, "bad": 1 }
+    }
+  }
+  ```
+
+### Безопасность
+
+- **AIza-ключи в URL → 400**. Запрос с `?key=AIza…` всегда
+  отбивается (даже при `KEY_PATH_ENABLED=false`), чтобы ключи
+  не попадали в access-логи, browser history и referer.
+- **AIza-ключи в логах → redact**. `x-goog-api-key` (и все
+  регистры) добавлены в pino redact paths. `Authorization` тоже.
+- **Один key-rotation цикл на запрос**. Если все ключи в cooldown
+  или bad — 503 + `Retry-After`, без бесконечного перебора.
+- **Обратно совместимо с 2.0.x**. `GEMINI_API_KEYS` пуст → прокси
+  ведёт себя ровно как раньше. OAuth-клиенты не замечают изменений.
 
 ## 🏗 Архитектура
 
