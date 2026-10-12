@@ -4,6 +4,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { Hono } from 'hono';
 import { createStore, type Store } from '../../accounts/store.js';
+import { KeyPool } from '../gemini/keyPool.js';
 import { handleAdminApi } from './api.js';
 
 const KEY = 'a'.repeat(64);
@@ -17,7 +18,10 @@ vi.mock('../../oauth/client.js', () => ({
   oauthClient: () => ({ getToken: getTokenMock }),
 }));
 
-function makeApp(store: Store) {
+function makeApp(
+  store: Store,
+  keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 }),
+) {
   const app = new Hono();
   // mock refresher: both methods are now part of the RefresherLike contract
   // (the admin refresh endpoint calls forceRefresh after d15a927).
@@ -25,7 +29,14 @@ function makeApp(store: Store) {
     getAccessToken: async (id: number) => `tok-${id}`,
     forceRefresh: async (id: number) => `tok-${id}`,
   };
-  handleAdminApi({ app, store, refresher: refresher as never, encryptionKey: KEY, adminToken: ADMIN });
+  handleAdminApi({
+    app,
+    store,
+    refresher: refresher as never,
+    encryptionKey: KEY,
+    adminToken: ADMIN,
+    keyPool,
+  });
   return app;
 }
 
@@ -278,5 +289,204 @@ describe('handleAdminApi', () => {
     expect(body).not.toHaveProperty('tokenPreview');
     expect(body).not.toHaveProperty('accessToken');
     expect(body).not.toHaveProperty('accessTokenPreview');
+  });
+
+  const K1 = 'AIzaSyA' + 'a'.repeat(32); // 39 chars — real Google API key length
+  const K2 = 'AIzaSyB' + 'b'.repeat(32);
+
+  it('GET /admin/api/keys returns [] when empty', async () => {
+    const res = await makeApp(store).request('/admin/api/keys', { headers: adminHeaders() });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  it('POST /admin/api/keys creates a row, adds to the pool, returns 201 without the key', async () => {
+    const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+    const app = makeApp(store, keyPool);
+    const res = await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'prod-a', key: K1 }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.label).toBe('prod-a');
+    expect(body.keyId).toHaveLength(8);
+    expect(body).not.toHaveProperty('key');
+    expect(JSON.stringify(body)).not.toContain(K1);
+    expect(keyPool.pick().key).toBe(K1);
+  });
+
+  it('GET after POST returns metadata only (no plaintext anywhere)', async () => {
+    const app = makeApp(store);
+    await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'a', key: K1 }),
+    });
+    const res = await app.request('/admin/api/keys', { headers: adminHeaders() });
+    const text = JSON.stringify(await res.json());
+    expect(text).not.toContain(K1);
+    expect(text).toContain('keyId');
+  });
+
+  it('logger is never called with the plaintext key', async () => {
+    const loggerMod = await import('../../logger.js');
+    const spy = vi.spyOn(loggerMod.logger, 'info').mockImplementation(() => undefined);
+    const errSpy = vi.spyOn(loggerMod.logger, 'error').mockImplementation(() => undefined);
+    const warnSpy = vi.spyOn(loggerMod.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const app = makeApp(store);
+      await app.request('/admin/api/keys', {
+        method: 'POST', headers: adminHeaders(),
+        body: JSON.stringify({ label: 'a', key: K1 }),
+      });
+      await app.request('/admin/api/keys', { headers: adminHeaders() });
+      for (const fn of [spy, errSpy, warnSpy]) {
+        for (const call of fn.mock.calls) {
+          expect(JSON.stringify(call)).not.toContain(K1);
+        }
+      }
+    } finally {
+      spy.mockRestore(); errSpy.mockRestore(); warnSpy.mockRestore();
+    }
+  });
+
+  it('POST rejects an empty label (400 invalid_request)', async () => {
+    const res = await makeApp(store).request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: '   ', key: K1 }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid_request');
+  });
+
+  it('POST rejects a label with illegal characters (400 invalid_request)', async () => {
+    const res = await makeApp(store).request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'has space', key: K1 }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST rejects a malformed key (400 invalid_key_format)', async () => {
+    const res = await makeApp(store).request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'a', key: 'not-a-google-key' }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid_key_format');
+  });
+
+  it('POST rejects a duplicate label (409 label_taken)', async () => {
+    const app = makeApp(store);
+    await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'dup', key: K1 }),
+    });
+    const res = await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'dup', key: K2 }),
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('label_taken');
+  });
+
+  it('POST rejects a duplicate key (409 key_already_registered)', async () => {
+    const app = makeApp(store);
+    await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'a', key: K1 }),
+    });
+    const res = await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'b', key: K1 }),
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('key_already_registered');
+  });
+
+  it('DELETE removes the row and purges the key from the pool', async () => {
+    const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+    const app = makeApp(store, keyPool);
+    const created = await (await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'a', key: K1 }),
+    })).json();
+    const res = await app.request('/admin/api/keys/' + created.id, {
+      method: 'DELETE', headers: adminHeaders(),
+    });
+    expect(res.status).toBe(204);
+    expect(store.listApiKeys()).toHaveLength(0);
+    expect(() => keyPool.pick()).toThrow();
+  });
+
+  it('DELETE returns 404 for an unknown id', async () => {
+    const res = await makeApp(store).request('/admin/api/keys/999', {
+      method: 'DELETE', headers: adminHeaders(),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('DELETE rejects non-canonical ids (hex / exp / blank) with 400', async () => {
+    // Number('0x1A') === 26, Number('1e2') === 100, Number('') === 0.
+    // A loose Number() check would let DELETE /admin/api/keys/0x1A
+    // delete row 26. Pin the strict digit rule.
+    const app = makeApp(store);
+    for (const id of ['abc', '0x1A', '1e2', '', '1.5', '-1']) {
+      const res = await app.request('/admin/api/keys/' + id, {
+        method: 'DELETE', headers: adminHeaders(),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('invalid_id');
+    }
+  });
+
+  it('PATCH enabled:false drops the key from the pool; true restores it', async () => {
+    const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+    const app = makeApp(store, keyPool);
+    const created = await (await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'a', key: K1 }),
+    })).json();
+    const off = await app.request('/admin/api/keys/' + created.id, {
+      method: 'PATCH', headers: adminHeaders(),
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(off.status).toBe(200);
+    expect((await off.json()).enabled).toBe(false);
+    expect(() => keyPool.pick()).toThrow();
+    const on = await app.request('/admin/api/keys/' + created.id, {
+      method: 'PATCH', headers: adminHeaders(),
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(on.status).toBe(200);
+    expect((await on.json()).enabled).toBe(true);
+    expect(keyPool.pick().key).toBe(K1);
+  });
+
+  it('PATCH returns 404 for an unknown id', async () => {
+    const res = await makeApp(store).request('/admin/api/keys/999', {
+      method: 'PATCH', headers: adminHeaders(),
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('PATCH returns 400 when enabled is not a boolean', async () => {
+    const app = makeApp(store);
+    const created = await (await app.request('/admin/api/keys', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({ label: 'a', key: K1 }),
+    })).json();
+    const res = await app.request('/admin/api/keys/' + created.id, {
+      method: 'PATCH', headers: adminHeaders(),
+      body: JSON.stringify({ enabled: 'yes' }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid_request');
+  });
+
+  it('GET /admin/api/keys requires admin auth', async () => {
+    const res = await makeApp(store).request('/admin/api/keys');
+    expect([401, 403]).toContain(res.status);
   });
 });

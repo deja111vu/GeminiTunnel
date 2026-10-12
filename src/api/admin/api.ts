@@ -8,8 +8,9 @@ import { buildAuthorizationUrl } from '../../oauth/flow.js';
 import { addPending } from '../../oauth/state.js';
 import { finalizeLogin, FinalizeError } from '../../oauth/finalize.js';
 import { requireAdmin, setAdminCookie, clearAdminCookie } from './auth.js';
-import type { Store } from '../../accounts/store.js';
+import { ApiKeyConflictError, type Store } from '../../accounts/store.js';
 import type { RefresherLike } from '../../accounts/pool.js';
+import { KEY_RE } from '../gemini/keyConfig.js';
 import type { KeyPool } from '../gemini/keyPool.js';
 
 const StartBody = z.object({ accountLabel: z.string().min(1).max(64).default('default') });
@@ -18,6 +19,17 @@ const ExchangeBody = z.object({
   code: z.string().min(1).max(4096),
 });
 const LoginBody = z.object({ token: z.string().min(1).max(256) });
+const KeyBody = z.object({
+  label: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
+  key: z.string().regex(KEY_RE),
+});
+const KeyPatchBody = z.object({ enabled: z.boolean() });
+
+function parseRowId(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
 
 export interface AdminApiDeps {
   app: Hono;
@@ -158,6 +170,56 @@ export function handleAdminApi({
       logger.error({ err: (err as Error).message }, 'admin: oauth/exchange internal error');
       return c.json({ error: 'internal_error' }, 500);
     }
+  });
+
+  app.get('/admin/api/keys', (c) => c.json(store.listApiKeys()));
+
+  app.post('/admin/api/keys', async (c) => {
+    const raw = await c.req.json().catch(() => null);
+    const parsed = KeyBody.safeParse(raw);
+    if (!parsed.success) {
+      const keyIssue = parsed.error.issues.find((i) => i.path[0] === 'key');
+      return c.json({ error: keyIssue ? 'invalid_key_format' : 'invalid_request' }, 400);
+    }
+    try {
+      // DB first, pool second: a failed insert must not leave the pool
+      // holding a key the DB never recorded.
+      const row = store.addApiKey(parsed.data.label, parsed.data.key);
+      keyPool.addKey(parsed.data.key);
+      return c.json(row, 201);
+    } catch (err) {
+      if (err instanceof ApiKeyConflictError) {
+        return c.json({ error: err.conflict }, 409);
+      }
+      // Never log the request body here — it contains the plaintext key.
+      logger.error({ err: (err as Error).message }, 'admin: api key add failed');
+      return c.json({ error: 'internal_error' }, 500);
+    }
+  });
+
+  app.delete('/admin/api/keys/:id?', (c) => {
+    const id = parseRowId(c.req.param('id') ?? '');
+    if (id === null) return c.json({ error: 'invalid_id' }, 400);
+    const row = store.getApiKeyWithSecret(id);
+    if (!row) return c.json({ error: 'not_found' }, 404);
+    store.removeApiKey(id);
+    keyPool.removeKey(row.key);
+    return c.body(null, 204);
+  });
+  app.delete('/admin/api/keys/', (c) => c.json({ error: 'invalid_id' }, 400));
+
+  app.patch('/admin/api/keys/:id?', async (c) => {
+    const id = parseRowId(c.req.param('id') ?? '');
+    if (id === null) return c.json({ error: 'invalid_id' }, 400);
+    const raw = await c.req.json().catch(() => null);
+    const parsed = KeyPatchBody.safeParse(raw);
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    const row = store.getApiKeyWithSecret(id);
+    if (!row) return c.json({ error: 'not_found' }, 404);
+    const updated = store.setApiKeyEnabled(id, parsed.data.enabled);
+    if (parsed.data.enabled) keyPool.addKey(row.key);
+    else keyPool.removeKey(row.key);
+    return c.json(updated);
   });
 }
 
