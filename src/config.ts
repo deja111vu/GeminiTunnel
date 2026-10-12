@@ -54,7 +54,7 @@ const clientKey = z
 // there AND here.
 const AIZA_PREFIX = 'AIza';
 const KEY_BODY = '[a-zA-Z0-9_-]';
-const KEY_RE: Readonly<RegExp> = new RegExp(`^${AIZA_PREFIX}${KEY_BODY}{39}$`);
+const KEY_RE: Readonly<RegExp> = new RegExp(`^${AIZA_PREFIX}${KEY_BODY}{35}$`);
 
 const geminiApiKeys = z
   .string()

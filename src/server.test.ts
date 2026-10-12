@@ -4,7 +4,7 @@ import { KeyPool } from './api/gemini/keyPool.js';
 import { KeyClient } from './api/gemini/keyClient.js';
 import type { Config } from './config.js';
 
-const K1 = 'AIzaSyA' + 'a'.repeat(36);
+const K1 = 'AIzaSyA' + 'a'.repeat(32);
 
 describe('server', () => {
   it('GET /health returns ok', async () => {

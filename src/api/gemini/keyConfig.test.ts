@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { parseApiKeys, KEY_RE, keyIdFor, findAizaInQuery, looksLikeApiKey } from './keyConfig.js';
 
-// A valid Google API key is 43 chars total: "AIza" + 39 chars of [a-zA-Z0-9_-].
-const VALID = 'AIzaSyA' + 'a'.repeat(36); // 7 + 36 = 43
+// A valid Google API key is 39 chars total: "AIza" + 35 chars of [a-zA-Z0-9_-].
+const VALID = 'AIzaSyA' + 'a'.repeat(32); // 7 + 32 = 39
 
 describe('parseApiKeys', () => {
   it('returns [] for undefined', () => {
@@ -25,8 +25,8 @@ describe('parseApiKeys', () => {
   });
   it('parses 3 valid keys, preserves order, dedupes', () => {
     const k1 = VALID;
-    const k2 = 'AIzaSyB' + 'b'.repeat(36);
-    const k3 = 'AIzaSyC' + 'c'.repeat(36);
+    const k2 = 'AIzaSyB' + 'b'.repeat(32);
+    const k3 = 'AIzaSyC' + 'c'.repeat(32);
     expect(parseApiKeys(`${k1},${k2},${k3}`)).toEqual([k1, k2, k3]);
     expect(parseApiKeys(`${k1},${k1},${k2}`)).toEqual([k1, k2]);
   });
@@ -36,25 +36,31 @@ describe('parseApiKeys', () => {
   it('drops invalid format with no throw', () => {
     expect(parseApiKeys(`not-an-api-key,${VALID},short`)).toEqual([VALID]);
   });
-  it('drops keys that do not match /^AIza[a-zA-Z0-9_-]{39}$/ (length, prefix, charset)', () => {
-    // Wrong length
-    const tooShort = 'AIzaSyA' + 'a'.repeat(35);
-    const tooLong = 'AIzaSyA' + 'a'.repeat(40);
-    // Wrong prefix (lowercase / wrong letters)
-    const wrongPrefix = 'BIzaSyA' + 'a'.repeat(36);
-    const mixedCasePrefix = 'aIzaSyA' + 'a'.repeat(36);
-    // Wrong charset in body: + / = . @ space (each is 43 chars long, passes length, fails charset)
-    const plusBody = 'AIzaSyA' + '+'.repeat(36);
-    const slashBody = 'AIzaSyA' + '/'.repeat(36);
-    const spaceBody = 'AIzaSyA' + ' '.repeat(36);
-    expect(
-      parseApiKeys(`${tooShort},${tooLong},${wrongPrefix},${mixedCasePrefix},${plusBody},${slashBody},${spaceBody},${VALID}`),
-    ).toEqual([VALID]);
+  it('accepts a real 39-char Google API key (AIza + 35 body)', () => {
+    // Real Google API keys are 39 chars total — verified against
+    // cloud.google.com/docs/authentication/api-keys (every sample there
+    // is 39). The old {39} body asked for 43 and rejected every real key.
+    const real39 = 'AIzaSyA' + 'a'.repeat(32); // 7 + 32 = 39
+    expect(real39).toHaveLength(39);
+    expect(KEY_RE.test(real39)).toBe(true);
+  });
+
+  it('drops keys that do not match /^AIza[a-zA-Z0-9_-]{35}$/ (length, prefix, charset)', () => {
+    const tooShort = 'AIzaSyA' + 'a'.repeat(31); // 38
+    const tooLong = 'AIzaSyA' + 'a'.repeat(33);  // 40
+    const wrongPrefix = 'BIzaSyA' + 'a'.repeat(32);
+    const mixedCasePrefix = 'aIzaSyA' + 'a'.repeat(32);
+    const plusBody = 'AIzaSyA' + '+'.repeat(32);
+    const slashBody = 'AIzaSyA' + '/'.repeat(32);
+    const spaceBody = 'AIzaSyA' + ' '.repeat(32);
+    for (const bad of [tooShort, tooLong, wrongPrefix, mixedCasePrefix, plusBody, slashBody, spaceBody]) {
+      expect(KEY_RE.test(bad)).toBe(false);
+    }
   });
 
   it('preserves order with whitespace + invalid + valid interleaving', () => {
     const k1 = VALID;
-    const k2 = 'AIzaSyB' + 'b'.repeat(36);
+    const k2 = 'AIzaSyB' + 'b'.repeat(32);
     expect(
       parseApiKeys(`  ,  not-a-key  ,  ${k1} ,  still-not-a-key  ,${k2}  `),
     ).toEqual([k1, k2]);
@@ -71,7 +77,7 @@ describe('keyIdFor', () => {
   // Used in place of `key.slice(-4)` for log correlation. The id must
   // be (a) stable per-key, (b) 8 hex chars, (c) NOT any substring of
   // the raw key, so a leaked log line gives the operator nothing.
-  const K = 'AIzaSyA' + 'a'.repeat(36);
+  const K = 'AIzaSyA' + 'a'.repeat(32);
 
   it('returns 8 lowercase hex chars', () => {
     expect(keyIdFor(K)).toMatch(/^[0-9a-f]{8}$/);
@@ -93,7 +99,7 @@ describe('keyIdFor', () => {
   });
 
   it('differs across distinct keys', () => {
-    const K2 = 'AIzaSyB' + 'b'.repeat(36);
+    const K2 = 'AIzaSyB' + 'b'.repeat(32);
     expect(keyIdFor(K)).not.toBe(keyIdFor(K2));
   });
 });
@@ -102,7 +108,7 @@ describe('looksLikeApiKey', () => {
   // Edge guard against AIza-shaped values in untrusted inputs. Used by
   // findAizaInQuery to scan query-string values regardless of parameter
   // name. Public on purpose — KEY_RE is also exported.
-  const K = 'AIzaSyA' + 'a'.repeat(36);
+  const K = 'AIzaSyA' + 'a'.repeat(32);
 
   it('accepts a well-formed key', () => {
     expect(looksLikeApiKey(K)).toBe(true);
@@ -124,8 +130,8 @@ describe('findAizaInQuery', () => {
   // The F3 edge guard. URLSearchParams.get('key') is case-sensitive on
   // the parameter name, so `?KEY=AIza…` bypasses a naive `get('key')`
   // check. We must match on VALUE, scanning every parameter.
-  const K = 'AIzaSyA' + 'a'.repeat(36);
-  const K2 = 'AIzaSyB' + 'b'.repeat(36);
+  const K = 'AIzaSyA' + 'a'.repeat(32);
+  const K2 = 'AIzaSyB' + 'b'.repeat(32);
 
   it('returns the AIza value when present under the conventional `key` name', () => {
     const p = new URLSearchParams(`key=${K}`);
@@ -171,7 +177,7 @@ describe('KEY_RE drift', () => {
   //   - src/api/gemini/middleware.ts (imports KEY_RE now)
   //   - src/config.ts (inlined as AIZA_PREFIX+KEY_BODY to break a startup cycle)
   // config.ts and keyConfig.ts use the same construction, so the canonical
-  // source form is `^AIza[a-zA-Z0-9_-]{39}$`. If a maintainer ever
+  // source form is `^AIza[a-zA-Z0-9_-]{35}$`. If a maintainer ever
   // hand-edits one site, the parser and the request dispatcher will
   // silently disagree — the server boots, accepts keys at the config
   // layer, and rejects them at the middleware (or vice versa). These
@@ -180,7 +186,7 @@ describe('KEY_RE drift', () => {
   const repoRoot = here.replace(/[\\/]src[\\/]api[\\/]gemini[\\/].*$/, '');
 
   it('KEY_RE source matches the canonical pattern', () => {
-    expect(KEY_RE.source).toBe('^AIza[a-zA-Z0-9_-]{39}$');
+    expect(KEY_RE.source).toBe('^AIza[a-zA-Z0-9_-]{35}$');
   });
 
   it('middleware.ts imports KEY_RE from keyConfig (not inlined)', () => {
@@ -202,13 +208,13 @@ describe('KEY_RE drift', () => {
     // this test pins that copy to the same source.
     const src = readFileSync(`${repoRoot}/src/config.ts`, 'utf8');
     // The pattern is built from AIZA_PREFIX + KEY_BODY inside a template
-    // literal: `^${AIZA_PREFIX}${KEY_BODY}{39}$`. If a maintainer ever
+    // literal: `^${AIZA_PREFIX}${KEY_BODY}{35}$`. If a maintainer ever
     // hand-edits the inlined copy, the parser and the request dispatcher
     // will silently disagree.
     expect(src).toMatch(/AIZA_PREFIX\s*=\s*['"]AIza['"]/);
     expect(src).toMatch(/KEY_BODY\s*=\s*['"]\[a-zA-Z0-9_-\]['"]/);
     // The construction site uses `${...}` interpolation, so we match
-    // that form rather than the literal `KEY_BODY{39}$`.
-    expect(src).toMatch(/\$\{AIZA_PREFIX\}[\s\S]*?\$\{KEY_BODY\}\{39\}\$/);
+    // that form rather than the literal `KEY_BODY{35}$`.
+    expect(src).toMatch(/\$\{AIZA_PREFIX\}[\s\S]*?\$\{KEY_BODY\}\{35\}\$/);
   });
 });

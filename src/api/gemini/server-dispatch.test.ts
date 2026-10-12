@@ -6,7 +6,7 @@ import { KeyClient } from './keyClient.js';
 import type { Config } from '../../config.js';
 import { timingSafeEqual } from 'node:crypto';
 
-const K1 = 'AIzaSyA' + 'a'.repeat(36);
+const K1 = 'AIzaSyA' + 'a'.repeat(32);
 const KEYCONFIG: Pick<Config, 'switchBudget' | 'requestTimeoutMs' | 'keyBadTtlMs'> = {
   switchBudget: 2,
   requestTimeoutMs: 5_000,

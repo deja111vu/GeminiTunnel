@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { KeyPool, NoKeyAvailableError } from './keyPool.js';
 
-const K1 = 'AIzaSyA' + 'a'.repeat(36);
-const K2 = 'AIzaSyB' + 'b'.repeat(36);
-const K3 = 'AIzaSyC' + 'c'.repeat(36);
+const K1 = 'AIzaSyA' + 'a'.repeat(32);
+const K2 = 'AIzaSyB' + 'b'.repeat(32);
+const K3 = 'AIzaSyC' + 'c'.repeat(32);
 const NOW = 1_700_000_000_000;
 
 describe('KeyPool', () => {
