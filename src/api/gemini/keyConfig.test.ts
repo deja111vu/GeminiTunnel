@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { parseApiKeys, KEY_RE, keyIdFor, findAizaInQuery, looksLikeApiKey } from './keyConfig.js';
+import { parseApiKeys, KEY_RE, keyIdFor, findApiKeyInQuery, looksLikeApiKey } from './keyConfig.js';
 
-// A valid Google API key is 39 chars total: "AIza" + 35 chars of [a-zA-Z0-9_-].
-const VALID = 'AIzaSyA' + 'a'.repeat(32); // 7 + 32 = 39
+// A valid Google API key (Auth format) is 49 chars total: "AQ.Ab" + 44 chars of [a-zA-Z0-9_-].
+const VALID = 'AQ.Ab' + 'a'.repeat(44); // 5 + 44 = 49
 
 describe('parseApiKeys', () => {
   it('returns [] for undefined', () => {
@@ -25,8 +25,8 @@ describe('parseApiKeys', () => {
   });
   it('parses 3 valid keys, preserves order, dedupes', () => {
     const k1 = VALID;
-    const k2 = 'AIzaSyB' + 'b'.repeat(32);
-    const k3 = 'AIzaSyC' + 'c'.repeat(32);
+    const k2 = 'AQ.Ab' + 'b'.repeat(44);
+    const k3 = 'AQ.Ab' + 'c'.repeat(44);
     expect(parseApiKeys(`${k1},${k2},${k3}`)).toEqual([k1, k2, k3]);
     expect(parseApiKeys(`${k1},${k1},${k2}`)).toEqual([k1, k2]);
   });
@@ -36,31 +36,32 @@ describe('parseApiKeys', () => {
   it('drops invalid format with no throw', () => {
     expect(parseApiKeys(`not-an-api-key,${VALID},short`)).toEqual([VALID]);
   });
-  it('accepts a real 39-char Google API key (AIza + 35 body)', () => {
-    // Real Google API keys are 39 chars total — verified against
-    // cloud.google.com/docs/authentication/api-keys (every sample there
-    // is 39). The old {39} body asked for 43 and rejected every real key.
-    const real39 = 'AIzaSyA' + 'a'.repeat(32); // 7 + 32 = 39
-    expect(real39).toHaveLength(39);
-    expect(KEY_RE.test(real39)).toBe(true);
+  it('accepts a real 49-char Google API key (AQ.Ab + 44 body)', () => {
+    // Real Google Auth-format keys are 49 chars total: `AQ.Ab` prefix
+    // (5 chars) + 44 body chars. Body is synthetic below; a real key
+    // matches the same regex.
+    const real49 = 'AQ.Ab' + 'a'.repeat(44); // 5 + 44 = 49
+    expect(real49).toHaveLength(49);
+    expect(KEY_RE.test(real49)).toBe(true);
   });
 
-  it('drops keys that do not match /^AIza[a-zA-Z0-9_-]{35}$/ (length, prefix, charset)', () => {
-    const tooShort = 'AIzaSyA' + 'a'.repeat(31); // 38
-    const tooLong = 'AIzaSyA' + 'a'.repeat(33);  // 40
-    const wrongPrefix = 'BIzaSyA' + 'a'.repeat(32);
-    const mixedCasePrefix = 'aIzaSyA' + 'a'.repeat(32);
-    const plusBody = 'AIzaSyA' + '+'.repeat(32);
-    const slashBody = 'AIzaSyA' + '/'.repeat(32);
-    const spaceBody = 'AIzaSyA' + ' '.repeat(32);
-    for (const bad of [tooShort, tooLong, wrongPrefix, mixedCasePrefix, plusBody, slashBody, spaceBody]) {
+  it('drops keys that do not match /^AQ\\.Ab[a-zA-Z0-9_-]{44}$/ (length, prefix, charset)', () => {
+    const tooShort = 'AQ.Ab' + 'a'.repeat(43); // 48
+    const tooLong = 'AQ.Ab' + 'a'.repeat(45);  // 50
+    const wrongPrefix = 'BQ.Ab' + 'a'.repeat(44);
+    const mixedCasePrefix = 'aq.Ab' + 'a'.repeat(44);
+    const legacyAIza = 'AIzaSyA' + 'a'.repeat(32); // 39-char legacy, no longer accepted
+    const plusBody = 'AQ.Ab' + '+'.repeat(44);
+    const slashBody = 'AQ.Ab' + '/'.repeat(44);
+    const spaceBody = 'AQ.Ab' + ' '.repeat(44);
+    for (const bad of [tooShort, tooLong, wrongPrefix, mixedCasePrefix, legacyAIza, plusBody, slashBody, spaceBody]) {
       expect(KEY_RE.test(bad)).toBe(false);
     }
   });
 
   it('preserves order with whitespace + invalid + valid interleaving', () => {
     const k1 = VALID;
-    const k2 = 'AIzaSyB' + 'b'.repeat(32);
+    const k2 = 'AQ.Ab' + 'b'.repeat(44);
     expect(
       parseApiKeys(`  ,  not-a-key  ,  ${k1} ,  still-not-a-key  ,${k2}  `),
     ).toEqual([k1, k2]);
@@ -77,7 +78,7 @@ describe('keyIdFor', () => {
   // Used in place of `key.slice(-4)` for log correlation. The id must
   // be (a) stable per-key, (b) 8 hex chars, (c) NOT any substring of
   // the raw key, so a leaked log line gives the operator nothing.
-  const K = 'AIzaSyA' + 'a'.repeat(32);
+  const K = 'AQ.Ab' + 'a'.repeat(44);
 
   it('returns 8 lowercase hex chars', () => {
     expect(keyIdFor(K)).toMatch(/^[0-9a-f]{8}$/);
@@ -99,23 +100,27 @@ describe('keyIdFor', () => {
   });
 
   it('differs across distinct keys', () => {
-    const K2 = 'AIzaSyB' + 'b'.repeat(32);
+    const K2 = 'AQ.Ab' + 'b'.repeat(44);
     expect(keyIdFor(K)).not.toBe(keyIdFor(K2));
   });
 });
 
 describe('looksLikeApiKey', () => {
-  // Edge guard against AIza-shaped values in untrusted inputs. Used by
-  // findAizaInQuery to scan query-string values regardless of parameter
+  // Edge guard against well-formed key-shaped values in untrusted inputs. Used by
+  // findApiKeyInQuery to scan query-string values regardless of parameter
   // name. Public on purpose — KEY_RE is also exported.
-  const K = 'AIzaSyA' + 'a'.repeat(32);
+  const K = 'AQ.Ab' + 'a'.repeat(44);
 
-  it('accepts a well-formed key', () => {
+  it('accepts a well-formed AQ.Ab key (49 chars)', () => {
     expect(looksLikeApiKey(K)).toBe(true);
   });
 
+  it('rejects an AIza-shaped key (legacy format, no longer accepted)', () => {
+    expect(looksLikeApiKey('AIzaSyA' + 'a'.repeat(32))).toBe(false);
+  });
+
   it('rejects a truncated key (the F3 invariant: only well-formed keys are blocked)', () => {
-    expect(looksLikeApiKey('AIza')).toBe(false);
+    expect(looksLikeApiKey('AQ.Ab')).toBe(false);
     expect(looksLikeApiKey(K.slice(0, 10))).toBe(false);
   });
 
@@ -126,48 +131,49 @@ describe('looksLikeApiKey', () => {
   });
 });
 
-describe('findAizaInQuery', () => {
+describe('findApiKeyInQuery', () => {
   // The F3 edge guard. URLSearchParams.get('key') is case-sensitive on
-  // the parameter name, so `?KEY=AIza…` bypasses a naive `get('key')`
+  // the parameter name, so `?KEY=AQ.…` bypasses a naive `get('key')`
   // check. We must match on VALUE, scanning every parameter.
-  const K = 'AIzaSyA' + 'a'.repeat(32);
-  const K2 = 'AIzaSyB' + 'b'.repeat(32);
+  const K = 'AQ.Ab' + 'a'.repeat(44);
+  const K2 = 'AQ.Ab' + 'b'.repeat(44);
 
-  it('returns the AIza value when present under the conventional `key` name', () => {
+  it('returns the API key value when present under the conventional `key` name', () => {
     const p = new URLSearchParams(`key=${K}`);
-    expect(findAizaInQuery(p)).toBe(K);
+    expect(findApiKeyInQuery(p)).toBe(K);
   });
 
-  it('returns the AIza value when the parameter name has different casing (?KEY=)', () => {
+  it('returns the API key value when the parameter name has different casing (?KEY=)', () => {
     // F3 case-sensitivity regression: this used to return null because
     // URLSearchParams.get('key') is case-sensitive.
     const p = new URLSearchParams(`KEY=${K}`);
-    expect(findAizaInQuery(p)).toBe(K);
+    expect(findApiKeyInQuery(p)).toBe(K);
   });
 
-  it('returns the AIza value under arbitrary parameter names (?api_key=, ?apikey=)', () => {
-    expect(findAizaInQuery(new URLSearchParams(`api_key=${K}`))).toBe(K);
-    expect(findAizaInQuery(new URLSearchParams(`apikey=${K}`))).toBe(K);
-    expect(findAizaInQuery(new URLSearchParams(`token=${K}`))).toBe(K);
+  it('returns the API key value under arbitrary parameter names (?api_key=, ?apikey=)', () => {
+    expect(findApiKeyInQuery(new URLSearchParams(`api_key=${K}`))).toBe(K);
+    expect(findApiKeyInQuery(new URLSearchParams(`apikey=${K}`))).toBe(K);
+    expect(findApiKeyInQuery(new URLSearchParams(`token=${K}`))).toBe(K);
   });
 
-  it('returns null when no value matches the AIza format', () => {
-    expect(findAizaInQuery(new URLSearchParams('key=foo'))).toBeNull();
-    expect(findAizaInQuery(new URLSearchParams('key=AIza'))).toBeNull();
-    expect(findAizaInQuery(new URLSearchParams())).toBeNull();
-    expect(findAizaInQuery(new URLSearchParams('page=2&limit=10'))).toBeNull();
+  it('returns null when no value matches the API key format', () => {
+    expect(findApiKeyInQuery(new URLSearchParams('key=foo'))).toBeNull();
+    expect(findApiKeyInQuery(new URLSearchParams('key=AIza'))).toBeNull();
+    expect(findApiKeyInQuery(new URLSearchParams('key=AQ.Ab'))).toBeNull();
+    expect(findApiKeyInQuery(new URLSearchParams())).toBeNull();
+    expect(findApiKeyInQuery(new URLSearchParams('page=2&limit=10'))).toBeNull();
   });
 
-  it('ignores non-AIza values when a real key is also present', () => {
+  it('ignores non-key values when a real key is also present', () => {
     // Mixed bag: a page counter, a fake key, and a real key. Returns
     // the real one (whichever is found first).
     const p = new URLSearchParams(`page=1&key=fake&apikey=${K}`);
-    expect(findAizaInQuery(p)).toBe(K);
+    expect(findApiKeyInQuery(p)).toBe(K);
   });
 
-  it('returns the first AIza match when multiple are present', () => {
+  it('returns the first key match when multiple are present', () => {
     const p = new URLSearchParams(`key=${K}&api_key=${K2}`);
-    expect(findAizaInQuery(p)).toBe(K);
+    expect(findApiKeyInQuery(p)).toBe(K);
   });
 });
 
@@ -175,9 +181,9 @@ describe('KEY_RE drift', () => {
   // The Google API key regex is inlined in three places:
   //   - src/api/gemini/keyConfig.ts (canonical, exported here)
   //   - src/api/gemini/middleware.ts (imports KEY_RE now)
-  //   - src/config.ts (inlined as AIZA_PREFIX+KEY_BODY to break a startup cycle)
+  //   - src/config.ts (inlined as AQ_AB_PREFIX+KEY_BODY to break a startup cycle)
   // config.ts and keyConfig.ts use the same construction, so the canonical
-  // source form is `^AIza[a-zA-Z0-9_-]{35}$`. If a maintainer ever
+  // source form is `^AQ\.Ab[a-zA-Z0-9_-]{44}$`. If a maintainer ever
   // hand-edits one site, the parser and the request dispatcher will
   // silently disagree — the server boots, accepts keys at the config
   // layer, and rejects them at the middleware (or vice versa). These
@@ -186,7 +192,19 @@ describe('KEY_RE drift', () => {
   const repoRoot = here.replace(/[\\/]src[\\/]api[\\/]gemini[\\/].*$/, '');
 
   it('KEY_RE source matches the canonical pattern', () => {
-    expect(KEY_RE.source).toBe('^AIza[a-zA-Z0-9_-]{35}$');
+    // The prefix is interpolated as a literal string `'AQ.Ab'` so the
+    // stored source contains a literal `.` (not `\.`). The anchored
+    // regex matches the same strings either way; we pin the literal
+    // form because that's what `new RegExp(...)` produces.
+    expect(KEY_RE.source).toBe('^AQ.Ab[a-zA-Z0-9_-]{44}$');
+  });
+
+  it('AQ_AB_PREFIX constant in keyConfig.ts equals "AQ.Ab" (rename target for AIza migration)', () => {
+    // Pin the constant name + value: if a maintainer ever tries to revert
+    // the rename (back to AIZA_PREFIX) or change the prefix value, this trips.
+    const src = readFileSync(new URL('./keyConfig.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/AQ_AB_PREFIX\s*=\s*['"]AQ\.Ab['"]/);
+    expect(src).not.toMatch(/AIZA_PREFIX\s*=\s*['"]AIza['"]/);
   });
 
   it('middleware.ts imports KEY_RE from keyConfig (not inlined)', () => {
@@ -195,7 +213,7 @@ describe('KEY_RE drift', () => {
     // canonical parser.
     const src = readFileSync(`${repoRoot}/src/api/gemini/middleware.ts`, 'utf8');
     // No inlined copy of the regex shape.
-    expect(src).not.toMatch(/\/[\^]AIza/);
+    expect(src).not.toMatch(/\/[\^]AQ\\\.Ab/);
     // And the import is actually present — a refactor that removed
     // both the inline AND the import would leave the file referencing
     // an undefined symbol at runtime.
@@ -207,14 +225,14 @@ describe('KEY_RE drift', () => {
     // config.ts must keep an inlined copy (to break the startup cycle);
     // this test pins that copy to the same source.
     const src = readFileSync(`${repoRoot}/src/config.ts`, 'utf8');
-    // The pattern is built from AIZA_PREFIX + KEY_BODY inside a template
-    // literal: `^${AIZA_PREFIX}${KEY_BODY}{35}$`. If a maintainer ever
+    // The pattern is built from AQ_AB_PREFIX + KEY_BODY inside a template
+    // literal: `^${AQ_AB_PREFIX}${KEY_BODY}{44}$`. If a maintainer ever
     // hand-edits the inlined copy, the parser and the request dispatcher
     // will silently disagree.
-    expect(src).toMatch(/AIZA_PREFIX\s*=\s*['"]AIza['"]/);
+    expect(src).toMatch(/AQ_AB_PREFIX\s*=\s*['"]AQ\.Ab['"]/);
     expect(src).toMatch(/KEY_BODY\s*=\s*['"]\[a-zA-Z0-9_-\]['"]/);
     // The construction site uses `${...}` interpolation, so we match
-    // that form rather than the literal `KEY_BODY{35}$`.
-    expect(src).toMatch(/\$\{AIZA_PREFIX\}[\s\S]*?\$\{KEY_BODY\}\{35\}\$/);
+    // that form rather than the literal `KEY_BODY{44}$`.
+    expect(src).toMatch(/\$\{AQ_AB_PREFIX\}[\s\S]*?\$\{KEY_BODY\}\{44\}\$/);
   });
 });

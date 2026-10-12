@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { KeyClient } from './keyClient.js';
 import { HttpError } from '../codeassist/client.js';
 
-const KEY = 'AIzaSyA' + 'a'.repeat(32);
+const KEY = 'AQ.Ab' + 'a'.repeat(44);
 
 function makeFetch(responses: Array<{ status: number; body: string; contentType?: string }>): typeof fetch {
   let i = 0;

@@ -33,7 +33,7 @@ const REDACT_PATHS = [
   'req.headers["X-Goog-Api-Key"]',
   'config.geminiApiKeys',
   // Belt-and-braces: a future debug line that writes `keySuffix: ...` or
-  // `*.keySuffix` must not leak the last 4 chars of an AIza key. The
+  // `*.keySuffix` must not leak the last 4 chars of an AQ. key. The
   // preferred path is to log `keyId` (8 hex of SHA-256) instead — but
   // if a contributor adds the suffix back, the redact list catches it.
   '*.keySuffix',

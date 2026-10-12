@@ -6,12 +6,15 @@
 
 import { createHash } from 'node:crypto';
 
-const AIZA_PREFIX = 'AIza';
+const AQ_AB_PREFIX = 'AQ.Ab';
 const KEY_BODY = '[a-zA-Z0-9_-]';
 // Readonly RegExp: pinning the type and freezing the pattern prevents
 // accidental global-flag mutation. Set.prototype preserves insertion order,
 // so `new Set(...)` already gives us first-occurrence dedupe.
-export const KEY_RE: Readonly<RegExp> = new RegExp(`^${AIZA_PREFIX}${KEY_BODY}{35}$`);
+// A valid Google API key (Auth format, post-2026) is 49 chars total:
+// "AQ.Ab" + 44 chars of [a-zA-Z0-9_-]. Legacy AIza-format keys (39 chars)
+// are no longer accepted: Google cut them off in Sept 2026.
+export const KEY_RE: Readonly<RegExp> = new RegExp(`^${AQ_AB_PREFIX}${KEY_BODY}{44}$`);
 
 export function parseApiKeys(envValue: string | undefined): readonly string[] {
   if (!envValue) return [];
@@ -28,7 +31,7 @@ export function parseApiKeys(envValue: string | undefined): readonly string[] {
 // Stable, non-reversable per-key identifier for log correlation.
 //
 // `slice(-4)` was used as a fingerprint, but the last 4 chars of an
-// AIza key carry ~24 bits of entropy and let anyone with log access
+// AQ. key carry ~24 bits of entropy and let anyone with log access
 // correlate which suffix belongs to which operator/model. SHA-256 of
 // the full key, truncated to 8 hex chars, is:
 //   - stable across log lines (same key -> same id within a process)
@@ -56,17 +59,17 @@ export function looksLikeApiKey(value: string): boolean {
 }
 
 // Returns the first query-string value that matches a well-formed
-// AIza-shaped key, regardless of the parameter name. Used by the
-// edge guard that rejects `?key=AIza…` before it can leak into
-// access logs / browser history / referer headers.
+// Google API key (AQ. Auth format), regardless of the parameter name.
+// Used by the edge guard that rejects `?key=AQ.…` before it can leak
+// into access logs / browser history / referer headers.
 //
 // Case-insensitive on the parameter NAME side would require either
 // iterating the spec implementation or normalising the query string
 // ourselves. The cheaper, safer choice is: trust nothing about the
 // name, scan every value with KEY_RE. This also catches
-// `?api_key=AIza…` / `?apikey=AIza…` / any other name a client
+// `?api_key=AQ.…` / `?apikey=AQ.…` / any other name a client
 // happens to pick.
-export function findAizaInQuery(searchParams: URLSearchParams): string | null {
+export function findApiKeyInQuery(searchParams: URLSearchParams): string | null {
   for (const [, value] of searchParams.entries()) {
     if (KEY_RE.test(value)) return value;
   }

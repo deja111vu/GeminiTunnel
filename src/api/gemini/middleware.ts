@@ -2,7 +2,7 @@
 // `x-goog-api-key: <key>`, run it through the key path; otherwise let the
 // existing OAuth handler take over.
 //
-// Note: the `?key=AIza…`-in-query-string guard is NOT in this file. It
+// Note: the `?key=AQ.Ab…`-in-query-string guard is NOT in this file. It
 // lives in `server.ts` as `rejectKeyInQuery` and is mounted on /v1/*
 // unconditionally, before this dispatcher. That way OAuth-only
 // deployments (no keyPool/keyClient wired) still get the 400, and the

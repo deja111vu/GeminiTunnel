@@ -6,7 +6,7 @@ import { KeyClient } from './keyClient.js';
 import type { Config } from '../../config.js';
 import { timingSafeEqual } from 'node:crypto';
 
-const K1 = 'AIzaSyA' + 'a'.repeat(32);
+const K1 = 'AQ.Ab' + 'a'.repeat(44);
 const KEYCONFIG: Pick<Config, 'switchBudget' | 'requestTimeoutMs' | 'keyBadTtlMs'> = {
   switchBudget: 2,
   requestTimeoutMs: 5_000,
@@ -92,9 +92,9 @@ describe('keyOrOAuth middleware', () => {
   });
 
   it('?key=invalid → next() (no rejection, falls through to OAuth)', async () => {
-    // Only well-formed AIza keys are rejected from the query string. A
+    // Only well-formed AQ. keys are rejected from the query string. A
     // random `?key=foo` is not a security issue and should not 400.
-    // The well-formed `?key=AIza…` rejection is enforced by
+    // The well-formed `?key=AQ.Ab…` rejection is enforced by
     // `rejectKeyInQuery` in src/server.ts, NOT by this middleware —
     // see src/server.test.ts for the edge-guard tests.
     const app = makeApp({ enabled: true });

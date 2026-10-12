@@ -52,9 +52,9 @@ const clientKey = z
 // other module (logger, store, etc.), creating a cycle. The unit tests in
 // keyConfig.test.ts pin behaviour; if you change the regex, change it
 // there AND here.
-const AIZA_PREFIX = 'AIza';
+const AQ_AB_PREFIX = 'AQ.Ab';
 const KEY_BODY = '[a-zA-Z0-9_-]';
-const KEY_RE: Readonly<RegExp> = new RegExp(`^${AIZA_PREFIX}${KEY_BODY}{35}$`);
+const KEY_RE: Readonly<RegExp> = new RegExp(`^${AQ_AB_PREFIX}${KEY_BODY}{44}$`);
 
 const geminiApiKeys = z
   .string()

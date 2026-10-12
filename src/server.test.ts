@@ -4,7 +4,7 @@ import { KeyPool } from './api/gemini/keyPool.js';
 import { KeyClient } from './api/gemini/keyClient.js';
 import type { Config } from './config.js';
 
-const K1 = 'AIzaSyA' + 'a'.repeat(32);
+const K1 = 'AQ.Ab' + 'a'.repeat(44);
 
 describe('server', () => {
   it('GET /health returns ok', async () => {
@@ -111,8 +111,8 @@ describe('server', () => {
     });
   }
 
-  it('?key=AIza... is rejected in OAuth-only mode (no keyPool wired)', async () => {
-    // F3 invariant: a well-formed AIza in the URL must 400 even when
+  it('?key=AQ.Ab... is rejected in OAuth-only mode (no keyPool wired)', async () => {
+    // F3 invariant: a well-formed AQ. key in the URL must 400 even when
     // the dispatcher is not registered (OAuth-only deployment). The
     // proxy sits behind nginx/Cloudflare in production — those log the
     // raw URL, so the 400 must fire before any other handler.
@@ -127,9 +127,9 @@ describe('server', () => {
     expect(body.error).toBe('key_in_query_string_forbidden');
   });
 
-  it('?KEY=AIza... (uppercase) is also rejected — case-sensitivity regression', async () => {
+  it('?KEY=AQ.Ab... (uppercase) is also rejected — case-sensitivity regression', async () => {
     // URLSearchParams.get('key') is case-sensitive, so a naive
-    // `get('key')` check would let `?KEY=AIza…` through. The edge
+    // `get('key')` check would let `?KEY=AQ.Ab…` through. The edge
     // guard scans every value with KEY_RE, regardless of name, so the
     // bypass is closed.
     const app = createApp();
@@ -143,7 +143,7 @@ describe('server', () => {
     expect(body.error).toBe('key_in_query_string_forbidden');
   });
 
-  it('?api_key=AIza... is also rejected — arbitrary parameter names', async () => {
+  it('?api_key=AQ.Ab... is also rejected — arbitrary parameter names', async () => {
     // Same bypass class, different name. The guard matches on VALUE.
     const app = createApp();
     const res = await app.request(`/v1/chat/completions?api_key=${K1}`, {
@@ -175,7 +175,7 @@ describe('server', () => {
       headers: {
         'content-type': 'application/json',
         'content-length': String(JSON.stringify({ model: 'gemini-2.5-pro', messages: [] }).length),
-        'x-goog-api-key': 'AIzaSyA' + 'a'.repeat(32),
+        'x-goog-api-key': 'AQ.Ab' + 'a'.repeat(44),
       },
       body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [] }),
     });

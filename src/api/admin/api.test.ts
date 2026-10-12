@@ -291,8 +291,8 @@ describe('handleAdminApi', () => {
     expect(body).not.toHaveProperty('accessTokenPreview');
   });
 
-  const K1 = 'AIzaSyA' + 'a'.repeat(32); // 39 chars — real Google API key length
-  const K2 = 'AIzaSyB' + 'b'.repeat(32);
+  const K1 = 'AQ.Ab' + 'a'.repeat(44); // 49 chars — Google Auth key length
+  const K2 = 'AQ.Ab' + 'b'.repeat(44);
 
   it('GET /admin/api/keys returns [] when empty', async () => {
     const res = await makeApp(store).request('/admin/api/keys', { headers: adminHeaders() });

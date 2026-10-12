@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { timingSafeEqual } from 'node:crypto';
-import { findAizaInQuery } from './api/gemini/keyConfig.js';
+import { findApiKeyInQuery } from './api/gemini/keyConfig.js';
 import { keyOrOAuth } from './api/gemini/middleware.js';
 import type { KeyClient } from './api/gemini/keyClient.js';
 import type { KeyPool } from './api/gemini/keyPool.js';
@@ -20,22 +20,22 @@ const BEARER_RE = /^Bearer\s+(.+)$/;
 
 // Edge guard against API keys in the query string. Mounted on /v1/*
 // unconditionally — NOT gated on keyPool/keyClient presence — so the
-// rejection fires even in OAuth-only deployments. A `?key=AIza…` in a
+// rejection fires even in OAuth-only deployments. A `?key=AQ.…` in a
 // request URL is logged by every reverse proxy, CDN, and browser in
 // the path; the proxy must 400 it before any of those see the response
 // path.
 //
 // We match on VALUE, not on parameter name. URLSearchParams.get('key')
-// is case-sensitive (?KEY=AIza… bypasses it), and clients pick whatever
+// is case-sensitive (?KEY=AQ.… bypasses it), and clients pick whatever
 // name they like (?api_key=, ?apikey=, …). The KEY_RE format is
 // public, so scanning every value carries no information leak; the
-// upside is that no well-formed AIza can sneak through regardless of
+// upside is that no well-formed AQ. key can sneak through regardless of
 // how the client named the parameter.
 function rejectKeyInQuery() {
   return async (c: import('hono').Context, next: import('hono').Next): Promise<Response | void> => {
     const url = new URL(c.req.url);
-    const aiza = findAizaInQuery(url.searchParams);
-    if (aiza !== null) {
+    const apiKey = findApiKeyInQuery(url.searchParams);
+    if (apiKey !== null) {
       return c.json({ error: 'key_in_query_string_forbidden' }, 400);
     }
     return next();
@@ -126,7 +126,7 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
   const clientAuth = requireClientKey(cfg.clientApiKey);
   app.use('/v1/*', clientAuth);
 
-  // Reject `?key=AIza...` in the query string unconditionally — even
+  // Reject `?key=AQ.Ab...` in the query string unconditionally — even
   // when the key path is disabled. The dispatcher below does the same
   // for the routes it owns; this guard exists so OAuth-only deployments
   // (no keyPool/keyClient wired) still get the 400, and so the
@@ -172,7 +172,7 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
   // /health is intentionally minimal: only `status` and `service`. The
   // previous `upstreams.{oauth,apiKey}` blocks disclosed pool sizes and
   // per-pool cooldown/bad counts to any unauthenticated caller that
-  // could reach the endpoint — a reconnaissance oracle for the AIza
+  // could reach the endpoint — a reconnaissance oracle for the AQ.
   // key path. Detailed pool state is now in the admin UI (which is
   // already authenticated) and is not surfaced here.
   app.get('/health', (c) => c.json({ status: 'ok', service: 'gemini-tunnel' }));

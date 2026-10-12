@@ -61,7 +61,7 @@ describe('config', () => {
     process.env.ADMIN_TOKEN = REQUIRED_ENV.ADMIN_TOKEN;
     process.env.ACCOUNTS_ENCRYPTION_KEY = REQUIRED_ENV.ACCOUNTS_ENCRYPTION_KEY;
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = REQUIRED_ENV.GOOGLE_OAUTH_CLIENT_SECRET;
-    const validKey = 'AIzaSyA' + 'a'.repeat(32);
+    const validKey = 'AQ.Ab' + 'a'.repeat(44);
     process.env.GEMINI_API_KEYS = `${validKey},${validKey},invalid,short`;
     const { config } = await import('./config.js');
     expect(config.geminiApiKeys).toEqual([validKey]);

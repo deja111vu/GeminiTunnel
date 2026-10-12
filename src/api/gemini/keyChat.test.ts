@@ -4,9 +4,9 @@ import { handleApiKeyChat } from './keyChat.js';
 import { KeyPool } from './keyPool.js';
 import { KeyClient } from './keyClient.js';
 
-const K1 = 'AIzaSyA' + 'a'.repeat(32);
-const K2 = 'AIzaSyB' + 'b'.repeat(32);
-const K3 = 'AIzaSyC' + 'c'.repeat(32);
+const K1 = 'AQ.Ab' + 'a'.repeat(44);
+const K2 = 'AQ.Ab' + 'b'.repeat(44);
+const K3 = 'AQ.Ab' + 'c'.repeat(44);
 
 function makeApp(pool: KeyPool, fetchImpl: typeof fetch, switchBudget = 2) {
   const app = new Hono();
