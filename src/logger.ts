@@ -6,7 +6,13 @@ import { config } from './config.js';
 // logged object. The list is intentionally broad (a future `Authorization`
 // header dump, an `access_token` field, a `password`, etc.) so a one-off
 // debug line that logs the wrong thing fails closed.
-const REDACT_PATHS = [
+// Exported for testability: src/logger.test.ts pins the contract that
+// every credential-shaped path is covered, and that the path string is
+// a NESTED path (e.g. `config.clientApiKey`) — pino's redact paths
+// are exact, not recursive, so a bare `clientApiKey` would silently
+// miss the value at `cfg.clientApiKey`. See B1 in the proxy-token
+// code-review for the regression this guard catches.
+export const REDACT_PATHS = [
   '*.access_token',
   '*.refresh_token',
   '*.id_token',
