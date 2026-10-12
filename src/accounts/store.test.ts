@@ -3,6 +3,10 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { createStore } from './store.js';
+import { keyIdFor } from '../api/gemini/keyConfig.js';
+
+const K1 = 'AIzaSyA' + 'a'.repeat(32); // 39 chars — real Google API key length
+const K2 = 'AIzaSyB' + 'b'.repeat(32);
 
 const KEY = 'a'.repeat(64);
 
@@ -154,5 +158,100 @@ describe('store CRUD', () => {
     const flash = snaps.find((s) => s.model === 'gemini-2.5-flash');
     expect(pro?.remaining).toBe(50);
     expect(flash?.remaining).toBe(950);
+  });
+});
+
+describe('api_keys CRUD', () => {
+  let tmp: string;
+  let store: ReturnType<typeof createStore>;
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'gt-'));
+    store = createStore(tmp, KEY);
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('addApiKey stores metadata; listApiKeys returns it without a key field', () => {
+    const added = store.addApiKey('prod-a', K1);
+    expect(added.label).toBe('prod-a');
+    expect(added.keyId).toBe(keyIdFor(K1));
+    expect(added.enabled).toBe(true);
+    expect(added.disabledAt).toBeNull();
+    const list = store.listApiKeys();
+    expect(list).toHaveLength(1);
+    expect(list[0]).not.toHaveProperty('key');
+    expect(JSON.stringify(list)).not.toContain(K1);
+  });
+
+  it('listApiKeysWithSecret returns the decrypted key', () => {
+    store.addApiKey('a', K1);
+    const list = store.listApiKeysWithSecret();
+    expect(list).toHaveLength(1);
+    expect(list[0].key).toBe(K1);
+  });
+
+  it('getApiKeyWithSecret returns the row with key; null for unknown id', () => {
+    const added = store.addApiKey('a', K1);
+    const row = store.getApiKeyWithSecret(added.id);
+    expect(row?.key).toBe(K1);
+    expect(store.getApiKeyWithSecret(999)).toBeNull();
+  });
+
+  it('duplicate label throws ApiKeyConflictError(label_taken)', () => {
+    store.addApiKey('dup', K1);
+    expect(() => store.addApiKey('dup', K2)).toThrowError(/label_taken/);
+  });
+
+  it('duplicate key throws ApiKeyConflictError(key_already_registered)', () => {
+    store.addApiKey('a', K1);
+    expect(() => store.addApiKey('b', K1)).toThrowError(/key_already_registered/);
+  });
+
+  it('removeApiKey deletes the row; second call returns false', () => {
+    const added = store.addApiKey('a', K1);
+    expect(store.removeApiKey(added.id)).toBe(true);
+    expect(store.listApiKeys()).toHaveLength(0);
+    expect(store.removeApiKey(added.id)).toBe(false);
+  });
+
+  it('setApiKeyEnabled(false) sets disabledAt; true clears it', () => {
+    const added = store.addApiKey('a', K1);
+    const off = store.setApiKeyEnabled(added.id, false);
+    expect(off?.enabled).toBe(false);
+    expect(off?.disabledAt).not.toBeNull();
+    const on = store.setApiKeyEnabled(added.id, true);
+    expect(on?.enabled).toBe(true);
+    expect(on?.disabledAt).toBeNull();
+  });
+
+  it('setApiKeyEnabled returns null for unknown id', () => {
+    expect(store.setApiKeyEnabled(999, false)).toBeNull();
+  });
+
+  it('seedApiKeysFromEnv inserts boot: rows and returns the count', () => {
+    expect(store.seedApiKeysFromEnv([K1, K2])).toBe(2);
+    expect(store.listApiKeys().map((k) => k.label)).toEqual(['boot:0', 'boot:1']);
+  });
+
+  it('seedApiKeysFromEnv is a no-op when the table is non-empty', () => {
+    store.addApiKey('manual', K1);
+    expect(store.seedApiKeysFromEnv([K2])).toBe(0);
+    expect(store.listApiKeys()).toHaveLength(1);
+  });
+
+  it('seedApiKeysFromEnv([]) is a no-op', () => {
+    expect(store.seedApiKeysFromEnv([])).toBe(0);
+    expect(store.listApiKeys()).toHaveLength(0);
+  });
+
+  it('api_keys survives a close/reopen cycle (persisted)', () => {
+    store.addApiKey('persisted', K1);
+    store.close();
+    store = createStore(tmp, KEY);
+    const list = store.listApiKeys();
+    expect(list).toHaveLength(1);
+    expect(list[0].label).toBe('persisted');
   });
 });

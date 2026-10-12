@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync, openSync, closeSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { encrypt as enc, decrypt as dec } from './encryption.js';
+import { keyIdFor } from '../api/gemini/keyConfig.js';
 
 export type AccountStatus = 'active' | 'invalid' | 'ineligible';
 
@@ -73,6 +74,18 @@ CREATE INDEX IF NOT EXISTS idx_quota_events_account_time
   ON account_quota_events (account_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_quota_snapshots_account_time
   ON account_quota_snapshots (account_id, fetched_at);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY,
+  label TEXT NOT NULL UNIQUE,
+  key_id TEXT NOT NULL UNIQUE,
+  key_ciphertext BLOB NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  disabled_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
 `;
 
 interface Row {
@@ -124,6 +137,46 @@ export interface QuotaSnapshot {
   fetchedAt: number;
 }
 
+export interface ApiKey {
+  id: number;
+  label: string;
+  keyId: string;
+  enabled: boolean;
+  createdAt: number;
+  disabledAt: number | null;
+}
+
+export interface ApiKeyWithSecret extends ApiKey {
+  key: string;
+}
+
+export class ApiKeyConflictError extends Error {
+  constructor(public readonly conflict: 'label_taken' | 'key_already_registered') {
+    super(conflict);
+  }
+}
+
+interface ApiKeyRow {
+  id: number;
+  label: string;
+  key_id: string;
+  key_ciphertext: Buffer;
+  enabled: number;
+  created_at: number;
+  disabled_at: number | null;
+}
+
+function rowToApiKey(r: ApiKeyRow): ApiKey {
+  return {
+    id: r.id,
+    label: r.label,
+    keyId: r.key_id,
+    enabled: r.enabled === 1,
+    createdAt: r.created_at,
+    disabledAt: r.disabled_at,
+  };
+}
+
 export interface Store {
   db: Database.Database;
   close: () => void;
@@ -150,6 +203,13 @@ export interface Store {
   hasRefreshToken: (id: number) => boolean;
   readActiveRefreshToken: (id: number) => string | null;
   readActiveAccessToken: (id: number) => { token: string; expiresAt: number } | null;
+  addApiKey: (label: string, key: string) => ApiKey;
+  listApiKeys: () => ApiKey[];
+  listApiKeysWithSecret: () => ApiKeyWithSecret[];
+  getApiKeyWithSecret: (id: number) => ApiKeyWithSecret | null;
+  removeApiKey: (id: number) => boolean;
+  setApiKeyEnabled: (id: number, enabled: boolean) => ApiKey | null;
+  seedApiKeysFromEnv: (keys: readonly string[]) => number;
 }
 
 export function createStore(dataDir: string, encryptionKeyHex: string = ''): Store {
@@ -229,6 +289,20 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
   const hasRefreshStmt = db.prepare(
     'SELECT 1 FROM accounts WHERE id=? AND refresh_token_encrypted IS NOT NULL',
   );
+
+  const insertApiKeyStmt = db.prepare(`
+    INSERT INTO api_keys (label, key_id, key_ciphertext, enabled, created_at, disabled_at)
+    VALUES (@label, @keyId, @ciphertext, @enabled, @createdAt, @disabledAt)
+  `);
+  const listApiKeysStmt = db.prepare('SELECT * FROM api_keys ORDER BY id ASC');
+  const getApiKeyStmt = db.prepare('SELECT * FROM api_keys WHERE id = ?');
+  const apiKeyLabelExistsStmt = db.prepare('SELECT 1 FROM api_keys WHERE label = ?');
+  const apiKeyIdExistsStmt = db.prepare('SELECT 1 FROM api_keys WHERE key_id = ?');
+  const removeApiKeyStmt = db.prepare('DELETE FROM api_keys WHERE id = ?');
+  const setApiKeyEnabledStmt = db.prepare(
+    'UPDATE api_keys SET enabled = ?, disabled_at = ? WHERE id = ?',
+  );
+  const countApiKeysStmt = db.prepare('SELECT COUNT(*) AS n FROM api_keys');
 
   const requireKey = (): void => {
     if (!encryptionKeyHex) throw new Error('encryption key required for write ops');
@@ -366,6 +440,80 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
         token: dec(r.access_token_encrypted, encryptionKeyHex).toString('utf8'),
         expiresAt: r.token_expires_at,
       };
+    },
+
+    addApiKey(label, key) {
+      requireKey();
+      const keyId = keyIdFor(key);
+      if (apiKeyLabelExistsStmt.get(label)) throw new ApiKeyConflictError('label_taken');
+      if (apiKeyIdExistsStmt.get(keyId)) throw new ApiKeyConflictError('key_already_registered');
+      const now = Date.now();
+      const info = insertApiKeyStmt.run({
+        label,
+        keyId,
+        ciphertext: enc(key, encryptionKeyHex),
+        enabled: 1,
+        createdAt: now,
+        disabledAt: null,
+      });
+      return {
+        id: Number(info.lastInsertRowid),
+        label,
+        keyId,
+        enabled: true,
+        createdAt: now,
+        disabledAt: null,
+      };
+    },
+
+    listApiKeys() {
+      return (listApiKeysStmt.all() as ApiKeyRow[]).map(rowToApiKey);
+    },
+
+    listApiKeysWithSecret() {
+      if (!encryptionKeyHex) return [];
+      return (listApiKeysStmt.all() as ApiKeyRow[]).map((r) => ({
+        ...rowToApiKey(r),
+        key: dec(r.key_ciphertext, encryptionKeyHex).toString('utf8'),
+      }));
+    },
+
+    getApiKeyWithSecret(id) {
+      if (!encryptionKeyHex) return null;
+      const r = getApiKeyStmt.get(id) as ApiKeyRow | undefined;
+      if (!r) return null;
+      return {
+        ...rowToApiKey(r),
+        key: dec(r.key_ciphertext, encryptionKeyHex).toString('utf8'),
+      };
+    },
+
+    removeApiKey(id) {
+      return removeApiKeyStmt.run(id).changes > 0;
+    },
+
+    setApiKeyEnabled(id, enabled) {
+      const existing = getApiKeyStmt.get(id) as ApiKeyRow | undefined;
+      if (!existing) return null;
+      const disabledAt = enabled ? null : Date.now();
+      setApiKeyEnabledStmt.run(enabled ? 1 : 0, disabledAt, id);
+      return { ...rowToApiKey(existing), enabled, disabledAt };
+    },
+
+    seedApiKeysFromEnv(keys) {
+      if (keys.length === 0) return 0;
+      const { n } = countApiKeysStmt.get() as { n: number };
+      if (n > 0) return 0;
+      let inserted = 0;
+      for (let i = 0; i < keys.length; i++) {
+        try {
+          this.addApiKey(`boot:${i}`, keys[i]);
+          inserted++;
+        } catch {
+          // duplicate label/keyId — skip, do not abort the seed
+        }
+      }
+      return inserted;
     },
   };
 }
