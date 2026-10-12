@@ -1,11 +1,14 @@
 // keyClient.ts — fetch wrapper for the Gemini Developer API (OpenAI-compat
-// endpoint at /v1beta/openai/chat/completions). Auth uses
-// `Authorization: Bearer <key>` per the official OpenAI-compat docs
-// (https://ai.google.dev/gemini-api/docs/openai). `x-goog-api-key` is the
-// header for the *native* Gemini API, not the OpenAI-compat layer.
-// Reuses HttpError from codeassist/client.ts; the body-cap helper is a small
-// local copy because exporting it from codeassist/client.ts would widen the
-// module's public surface for a single consumer.
+// endpoint at /v1beta/openai/chat/completions). Auth header selection is
+// delegated to `authHeadersFor` (keyConfig.ts) because Google split key
+// transport in 2026: AQ. Auth keys (post-2026) MUST ride on
+// `x-goog-api-key` (works on the OpenAI-compat layer too — see RedHat
+// ai-guardian #1617); legacy AIza Standard keys still ride on
+// `Authorization: Bearer` (deprecated Sept 2026 but kept in code while
+// any are still in rotation). Reuses HttpError from codeassist/client.ts;
+// the body-cap helper is a small local copy because exporting it from
+// codeassist/client.ts would widen the module's public surface for a
+// single consumer.
 
 import { HttpError } from '../codeassist/client.js';
 import { authHeadersFor } from './keyConfig.js';
