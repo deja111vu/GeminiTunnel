@@ -20,5 +20,16 @@ describe('serveAdminUi', () => {
     expect(root.headers.get('content-type')).toMatch(/text\/html/);
     expect(trailing.status).toBe(200);
   });
+
+  it('serves the API Keys tab markup', async () => {
+    const app = new Hono();
+    serveAdminUi(app);
+    const res = await app.request('/admin');
+    const html = await res.text();
+    expect(html).toContain('data-tab="keys"');
+    expect(html).toContain('id="panel-keys"');
+    expect(html).toContain('id="add-key-form"');
+    expect(html).toContain('/admin/api/keys');
+  });
 });
 

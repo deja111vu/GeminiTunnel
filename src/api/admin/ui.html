@@ -35,6 +35,7 @@
   .pill.active { background: #1b3a23; color: #6fdc8c; }
   .pill.invalid { background: #3a1b1b; color: #dc6f6f; }
   .pill.ineligible { background: #3a2e1b; color: #dca96f; }
+  .pill.disabled { background: #3a2e1b; color: #dca96f; }
   button.act {
     background: #2a2d34; color: #e8eaed; border: 1px solid #3a3d44; padding: 4px 10px;
     border-radius: 4px; cursor: pointer; font: inherit;
@@ -61,6 +62,7 @@
 </header>
 <nav>
   <button data-tab="accounts" class="active">Accounts</button>
+  <button data-tab="keys">API Keys</button>
   <button data-tab="quota">Quota</button>
   <button data-tab="logs">Logs</button>
 </nav>
@@ -70,6 +72,20 @@
       <button class="act" id="add-account">+ Add account</button>
     </p>
     <div id="accounts-table"><div class="empty">loading…</div></div>
+  </section>
+  <section id="panel-keys" class="panel">
+    <form id="add-key-form" style="display:flex;gap:0.5rem;align-items:flex-end;margin-bottom:1rem;flex-wrap:wrap">
+      <label style="display:flex;flex-direction:column;gap:0.25rem">
+        <span style="color:#9aa0a6;font-size:12px">label</span>
+        <input id="key-label" placeholder="prod-proj-A" maxlength="64" autocomplete="off" required>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:0.25rem">
+        <span style="color:#9aa0a6;font-size:12px">Google API key</span>
+        <input id="key-value" placeholder="AIzaSy…" style="width:320px" autocomplete="off" required>
+      </label>
+      <button class="act" type="submit">Add</button>
+    </form>
+    <div id="keys-table"><div class="empty">loading…</div></div>
   </section>
   <section id="panel-quota" class="panel">
     <select id="quota-account"><option>loading…</option></select>
@@ -96,7 +112,17 @@ function authHeaders() {
   return { 'content-type': 'application/json' };
 }
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) }, credentials: 'same-origin' });
+  // bodyCap (src/server.ts) requires Content-Length on POST/PUT/PATCH/DELETE.
+  // Browsers omit it for a bodyless DELETE/PATCH -> 411; an explicit empty
+  // body sends Content-Length: 0 and satisfies the cap.
+  const method = (opts.method || 'GET').toUpperCase();
+  const needsLen = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+  const res = await fetch(path, {
+    ...opts,
+    ...(needsLen && opts.body === undefined ? { body: '' } : {}),
+    headers: { ...authHeaders(), ...(opts.headers || {}) },
+    credentials: 'same-origin',
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     if (res.status === 401 && !path.endsWith('/login')) {
@@ -131,6 +157,7 @@ document.querySelectorAll('nav button').forEach((btn) => {
     btn.classList.add('active');
     $('#panel-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'quota') loadQuota();
+    if (btn.dataset.tab === 'keys') loadKeys();
   });
 });
 $('#save-token').addEventListener('click', async () => {
@@ -201,6 +228,62 @@ async function handleAccountAction(act, id) {
     loadAccounts();
   } catch (e) { toast(e.message, true); }
 }
+// API Keys
+async function loadKeys() {
+  try {
+    const list = await api('/admin/api/keys');
+    if (!list.length) {
+      $('#keys-table').innerHTML = '<div class="empty">no API keys yet — add one above</div>';
+      return;
+    }
+    const rows = list.map((k) => `
+      <tr>
+        <td>${escapeHtml(k.label)}</td>
+        <td><code>${escapeHtml(k.keyId)}</code></td>
+        <td><span class="pill ${k.enabled ? 'active' : 'disabled'}">${k.enabled ? 'active' : 'disabled'}</span></td>
+        <td>${fmtTime(k.createdAt)}</td>
+        <td>
+          <button class="act" data-act="toggle" data-id="${k.id}" data-enabled="${k.enabled}">${k.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="act danger" data-act="remove" data-id="${k.id}">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+    $('#keys-table').innerHTML = `<table>
+      <thead><tr><th>label</th><th>key id</th><th>status</th><th>created</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+    $('#keys-table').querySelectorAll('button[data-act]').forEach((b) => {
+      b.addEventListener('click', () => handleKeyAction(b.dataset.act, b.dataset.id, b.dataset.enabled));
+    });
+  } catch (e) { toast(e.message, true); }
+}
+async function handleKeyAction(act, id, enabled) {
+  try {
+    if (act === 'toggle') {
+      const next = enabled !== 'true';
+      await api('/admin/api/keys/' + id, { method: 'PATCH', body: JSON.stringify({ enabled: next }) });
+      toast(next ? 'enabled' : 'disabled');
+    } else if (act === 'remove') {
+      if (!confirm('Delete API key #' + id + '? This cannot be undone.')) return;
+      await api('/admin/api/keys/' + id, { method: 'DELETE' });
+      toast('deleted');
+    }
+    loadKeys();
+  } catch (e) { toast(e.message, true); }
+}
+$('#add-key-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const label = $('#key-label').value.trim();
+  const key = $('#key-value').value.trim();
+  if (!label || !key) { toast('label and key are required', true); return; }
+  try {
+    await api('/admin/api/keys', { method: 'POST', body: JSON.stringify({ label, key }) });
+    $('#key-label').value = '';
+    $('#key-value').value = '';
+    toast('key added');
+    loadKeys();
+  } catch (e) { toast(e.message, true); }
+});
 $('#add-account').addEventListener('click', async () => {
   const label = prompt('Account label (e.g. "work")?');
   if (!label) return;
