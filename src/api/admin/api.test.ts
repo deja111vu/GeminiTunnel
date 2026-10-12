@@ -291,7 +291,7 @@ describe('handleAdminApi', () => {
     expect(body).not.toHaveProperty('accessTokenPreview');
   });
 
-  const K1 = 'AQ.Ab' + 'a'.repeat(44); // 49 chars — Google Auth key length
+  const K1 = 'AQ.Ab' + 'a'.repeat(44); // 49 chars — a valid Google Auth key example (40..∞ allowed)
   const K2 = 'AQ.Ab' + 'b'.repeat(44);
 
   it('GET /admin/api/keys returns [] when empty', async () => {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { createStore } from './store.js';
 import { keyIdFor } from '../api/gemini/keyConfig.js';
 
-const K1 = 'AQ.Ab' + 'a'.repeat(44); // 49 chars — Google Auth key length
+const K1 = 'AQ.Ab' + 'a'.repeat(44); // 49 chars — a valid Google Auth key example (40..∞ allowed)
 const K2 = 'AQ.Ab' + 'b'.repeat(44);
 
 const KEY = 'a'.repeat(64);

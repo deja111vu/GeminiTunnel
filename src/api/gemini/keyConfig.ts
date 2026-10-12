@@ -11,10 +11,13 @@ const KEY_BODY = '[a-zA-Z0-9_-]';
 // Readonly RegExp: pinning the type and freezing the pattern prevents
 // accidental global-flag mutation. Set.prototype preserves insertion order,
 // so `new Set(...)` already gives us first-occurrence dedupe.
-// A valid Google API key (Auth format, post-2026) is 49 chars total:
-// "AQ.Ab" + 44 chars of [a-zA-Z0-9_-]. Legacy AIza-format keys (39 chars)
+// A valid Google API key (Auth format, post-2026) is "AQ.Ab" + 35 or
+// more chars of [a-zA-Z0-9_-] (40+ total). Body length is variable per
+// Google issuance, not fixed — see RedHat ai-guardian #1617
+// (https://github.com/RedHatProductSecurity/ai-guardian/issues/1617)
+// for the documented ~35-char floor. Legacy AIza-format keys (39 chars)
 // are no longer accepted: Google cut them off in Sept 2026.
-export const KEY_RE: Readonly<RegExp> = new RegExp(`^${AQ_AB_PREFIX}${KEY_BODY}{44}$`);
+export const KEY_RE: Readonly<RegExp> = new RegExp(`^${AQ_AB_PREFIX}${KEY_BODY}{35,}$`);
 
 export function parseApiKeys(envValue: string | undefined): readonly string[] {
   if (!envValue) return [];

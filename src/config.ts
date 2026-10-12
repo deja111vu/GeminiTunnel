@@ -54,7 +54,7 @@ const clientKey = z
 // there AND here.
 const AQ_AB_PREFIX = 'AQ.Ab';
 const KEY_BODY = '[a-zA-Z0-9_-]';
-const KEY_RE: Readonly<RegExp> = new RegExp(`^${AQ_AB_PREFIX}${KEY_BODY}{44}$`);
+const KEY_RE: Readonly<RegExp> = new RegExp(`^${AQ_AB_PREFIX}${KEY_BODY}{35,}$`);
 
 const geminiApiKeys = z
   .string()
