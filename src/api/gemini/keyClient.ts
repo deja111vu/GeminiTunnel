@@ -8,6 +8,7 @@
 // module's public surface for a single consumer.
 
 import { HttpError } from '../codeassist/client.js';
+import { authHeadersFor } from './keyConfig.js';
 
 const ENDPOINT = '/v1beta/openai/chat/completions';
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com';
@@ -67,13 +68,13 @@ export class KeyClient {
   }
 
   private headers(key: string): Record<string, string> {
-    // FIXME: post-2026 AQ. keys via `Authorization: Bearer` may 401 on
-    // the OpenAI-compat endpoint. The regex (keyConfig.ts) accepts
-    // AQ., but Google may require `x-goog-api-key` for the new format.
-    // Tracked as Task 7.1; for now the Bearer path is preserved for
-    // AIza-style keys still in rotation. See plan 2026-10-10-dynamic-api-keys.
+    // Auth header selection is delegated to authHeadersFor (keyConfig.ts)
+    // so the keyConfig KEY_RE / format knowledge stays in one place.
+    // AQ. Auth keys use `x-goog-api-key`; legacy AIza Standard keys
+    // still use `Authorization: Bearer` (deprecated Sept 2026 but
+    // kept in code while any are still in rotation).
     return {
-      Authorization: `Bearer ${key}`,
+      ...authHeadersFor(key),
       'Content-Type': 'application/json',
       'User-Agent': 'gemini-tunnel/2.0',
     };
