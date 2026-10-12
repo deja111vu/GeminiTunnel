@@ -24,6 +24,13 @@ OpenAI-совместимый прокси для **Google Code Assist / Gemini 
   refresh, удаление, запуск нового OAuth-логина. Авторизация через
   HttpOnly+Secure+SameSite=Strict cookie; Bearer-токен остался для
   curl-скриптов и тестов.
+- 🔐 **Proxy Access token (закрытый `/v1/*` по умолчанию)** —
+  администратор генерирует одноразовый Bearer-токен в Web UI
+  (вкладка Proxy Access); клиенты передают его в
+  `Authorization: Bearer <token>`. Без токена `/v1/*` возвращает
+  401. Токен хранится в SQLite (AES-256-GCM), в памяти лежит
+  только зеркало для дешёвого per-request сравнения. См. раздел
+  «Proxy Access» ниже.
 - 🛠️ **CLI `tunnel`** — то же самое из терминала: `login`, `list`,
   `remove`, `refresh`, `quota`. Удобно для SSH на VPS.
 - 🐳 **Docker-ready** — один контейнер, том для БД, healthcheck,
@@ -92,23 +99,29 @@ docker compose exec proxy tunnel list
 
 ## 🔌 Подключение клиентов
 
-Любой OpenAI-совместимый клиент, который позволяет задать `base_url`,
-подключается так:
+Сначала заведите proxy-токен в Web UI (см. раздел «Proxy Access»
+ниже). Дальше любой OpenAI-совместимый клиент, который позволяет
+задать `base_url`, подключается так:
 
-| Поле           | Значение                          |
-|----------------|-----------------------------------|
-| `base_url`     | `http://<VPS_IP>:8000/v1`         |
-| `api_key`      | любой непустой (например `dummy`)  |
-| `model`        | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| Поле       | Значение                  |
+|------------|---------------------------|
+| `base_url` | `http://<VPS_IP>:8000/v1` |
+| `api_key`  | proxy-токен               |
+| `model`    | `gemini-2.5-pro`          |
 
-Прокси использует свой Google OAuth — ключ клиента игнорируется.
+(Полное имя модели зависит от клиента; здесь для примера
+`gemini-2.5-pro`. Proxy-токен — из вкладки «Proxy Access»
+Web UI, см. раздел ниже.)
+
+Прокси использует свой Google OAuth — upstream-ключ клиента
+игнорируется.
 
 ### Claude Code
 
 ```bash
 export ANTHROPIC_BASE_URL=http://VPS_IP:8000
-# Claude Code берёт api_key из env, можно любой
-export ANTHROPIC_API_KEY=dummy
+# Claude Code берёт api_key из env — подставьте proxy-токен
+export ANTHROPIC_API_KEY=<PROXY_TOKEN>
 ```
 
 (либо через UI: Settings → API Key → Base URL)
@@ -116,15 +129,17 @@ export ANTHROPIC_API_KEY=dummy
 ### Cline (VS Code)
 
 Settings → API Provider → **OpenAI Compatible**:
+
 - Base URL: `http://VPS_IP:8000/v1`
-- API Key: `dummy`
+- API Key: `<PROXY_TOKEN>`
 - Model ID: `gemini-2.5-pro`
 
 ### Cursor
 
 Settings → Models → OpenAI API Key:
+
 - Override OpenAI Base URL: `http://VPS_IP:8000/v1`
-- API Key: `dummy`
+- API Key: `<PROXY_TOKEN>`
 
 ## 🔑 Gemini API key path (опционально)
 
@@ -209,6 +224,68 @@ curl -X POST http://VPS_IP:8000/v1/chat/completions \
   или bad — 503 + `Retry-After`, без бесконечного перебора.
 - **Обратно совместимо с 2.0.x**. `GEMINI_API_KEYS` пуст → прокси
   ведёт себя ровно как раньше. OAuth-клиенты не замечают изменений.
+
+## 🔐 Proxy Access: токен для /v1
+
+С 3.x поверхность `/v1/*` всегда закрыта. Каждый запрос должен
+нести `Authorization: Bearer <PROXY_TOKEN>`, иначе прокси вернёт
+401 + `WWW-Authenticate: Bearer realm="gemini-tunnel"`. Это
+заменяет прежнее поведение «нет env = открыто» (которое оставляло
+прокси уязвимым, если reverse-proxy забыли настроить).
+
+### Как получить токен
+
+1. Залогиньтесь в `/admin` (cookie + `ADMIN_TOKEN`).
+2. Откройте вкладку **Proxy Access**.
+3. Нажмите **Generate** — прокси создаст 64-символьный hex-токен
+   (32 байта из `crypto.randomBytes`) и покажет его **один раз**.
+   Скопируйте и сохраните; повторно увидеть plaintext нельзя.
+4. На любой клиентской стороне задайте этот токен в поле
+   `api_key` / `Authorization: Bearer …`.
+
+Generate / Rotate / Remove — все меняют и SQLite (AES-256-GCM),
+и in-memory зеркало, которое middleware читает на каждом
+запросе. Перезапуск прокси не нужен.
+
+### Bootstrap через `.env`
+
+Если доступа к Web UI ещё нет (первый бут на свежем сервере),
+задайте `CLIENT_API_KEY` в `.env` — он засеет зеркало при
+старте. **Это bootstrap hint, не runtime source of truth**:
+как только админ сделает Generate/Rotate/Remove в UI, env
+значение перестаёт использоваться, и прокси работает по
+DB-строке.
+
+```bash
+# Минимум 16 символов, URL-safe (A-Z a-z 0-9 . _ ~ + - / =).
+# Сгенерируйте: node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+CLIENT_API_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Если в `.env` нет `CLIENT_API_KEY` и в БД нет proxy-токена,
+прокси стартует, но `/v1/*` отвечает 401 на всё. Зайдите в
+админку, сгенерируйте токен — заработает.
+
+### Безопасность (Proxy Access)
+
+- **Token storage** — SQLite (таблица `proxy_client_key`, одна
+  строка, `id=1`), зашифровано тем же `ACCOUNTS_ENCRYPTION_KEY`,
+  что и refresh-токены аккаунтов. Plaintext никогда не пишется
+  в логи; в pino redact paths добавлен `config.clientApiKey`.
+- **GET никогда не возвращает plaintext** — только метаданные
+  (`keyId` — 8 hex SHA-256, `createdAt`, `updatedAt`,
+  `hasSecret`). Даже после Generate последующий GET показывает
+  только метаданные.
+- **Bodyless POST/PUT/DELETE** — `bodyCap` требует
+  `Content-Length: 0` (или явный `Content-Length: 0` для пустого
+  body). Без этого — 411. Защита от OOM через пустой POST.
+- **Pasted-key валидация** — admin-pasted ключ проверяется zod:
+  длина 16–256, regex `^[A-Za-z0-9._~+\-/=]+$`. Серверный
+  Generate всегда выдаёт 64 hex и trivially проходит проверку.
+- **Rotation cycle** — Generate/Rotate переписывают единственную
+  строку (`createdAt` сохраняется, `updatedAt` двигается).
+  Старый токен перестаёт работать сразу после успешной
+  записи в mirror.
 
 ## 🏗 Архитектура
 
