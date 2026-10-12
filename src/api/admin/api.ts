@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import { readFileSync, existsSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../../logger.js';
@@ -12,6 +13,7 @@ import { ApiKeyConflictError, type Store } from '../../accounts/store.js';
 import type { RefresherLike } from '../../accounts/pool.js';
 import { KEY_RE } from '../gemini/keyConfig.js';
 import type { KeyPool } from '../gemini/keyPool.js';
+import { getProxyTokenStore, type ProxyTokenStore } from './proxyTokenStore.js';
 
 const StartBody = z.object({ accountLabel: z.string().min(1).max(64).default('default') });
 const ExchangeBody = z.object({
@@ -24,6 +26,18 @@ const KeyBody = z.object({
   key: z.string().regex(KEY_RE),
 });
 const KeyPatchBody = z.object({ enabled: z.boolean() });
+// Proxy access token: same URL-safe alphabet as RFC 6750 Bearer (no
+// whitespace, no controls, no chars that would break `Authorization`
+// header parsing). Min 16 mirrors F1 in config.ts; max 256 leaves room
+// for a generated 64-hex token + 4× margin. Server-side generate
+// always emits 64 hex chars and satisfies this constraint.
+const ProxyTokenBody = z.object({
+  key: z
+    .string()
+    .min(16, 'must be at least 16 chars')
+    .max(256, 'must be at most 256 chars')
+    .regex(/^[A-Za-z0-9._~+\-/=]+$/, 'must be URL-safe'),
+});
 
 function parseRowId(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
@@ -38,6 +52,10 @@ export interface AdminApiDeps {
   encryptionKey: string;
   adminToken: string;
   keyPool: KeyPool;
+  // Optional: when omitted, proxy-token endpoints update only the DB
+  // (useful for tests and for callers that don't need the in-memory
+  // mirror). Production wiring (Step 8.6) always passes it.
+  proxyTokenStore?: ProxyTokenStore;
 }
 
 export function handleAdminApi({
@@ -47,6 +65,7 @@ export function handleAdminApi({
   encryptionKey,
   adminToken,
   keyPool,
+  proxyTokenStore = getProxyTokenStore(),
 }: AdminApiDeps): void {
   // Login + logout are NOT under requireAdmin — they're how the user
   // gets a session in the first place. We register them before the
@@ -220,6 +239,50 @@ export function handleAdminApi({
     if (parsed.data.enabled) keyPool.addKey(row.key);
     else keyPool.removeKey(row.key);
     return c.json(updated);
+  });
+
+  // GET /admin/api/proxy-token — singleton metadata only. Never
+  // returns the plaintext: the admin who set it already saw it in
+  // the PUT/generate response, and a future rotation is one click.
+  app.get('/admin/api/proxy-token', (c) => {
+    const meta = store.getClientKey();
+    if (!meta) return c.json({ hasSecret: false });
+    return c.json({ ...meta, hasSecret: true });
+  });
+
+  // PUT /admin/api/proxy-token — admin-pasted key. Validate the
+  // format before persisting, then DB-first + mirror-second.
+  app.put('/admin/api/proxy-token', async (c) => {
+    const raw = await c.req.json().catch(() => null);
+    const parsed = ProxyTokenBody.safeParse(raw);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_key_format' }, 400);
+    }
+    const meta = store.setClientKey(parsed.data.key);
+    proxyTokenStore.set(parsed.data.key);
+    logger.info({ keyId: meta.keyId }, 'admin: proxy token set');
+    return c.json({ ...meta, hasSecret: true });
+  });
+
+  // POST /admin/api/proxy-token/generate — server-side generation.
+  // Always emits 64 hex chars (32 bytes from randomBytes), which
+  // trivially satisfies ProxyTokenBody. The plaintext is returned
+  // exactly once: after this call the admin must copy it (or rotate).
+  app.post('/admin/api/proxy-token/generate', (c) => {
+    const key = randomBytes(32).toString('hex');
+    const meta = store.setClientKey(key);
+    proxyTokenStore.set(key);
+    logger.info({ keyId: meta.keyId }, 'admin: proxy token generated');
+    return c.json({ ...meta, key, hasSecret: true });
+  });
+
+  // DELETE /admin/api/proxy-token — idempotent. 204 whether or not
+  // a row existed; admin-UI doesn't need to distinguish.
+  app.delete('/admin/api/proxy-token', (c) => {
+    const existed = store.clearClientKey();
+    proxyTokenStore.set(undefined);
+    if (existed) logger.info('admin: proxy token cleared');
+    return c.body(null, 204);
   });
 }
 
