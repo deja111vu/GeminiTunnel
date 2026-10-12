@@ -112,7 +112,6 @@ export type Config = Readonly<{
   geminiApiKeys: readonly string[];
   keyCooldownAfter429Ms: number;
   keyBadTtlMs: number;
-  keyPathEnabled: boolean; // derived: geminiApiKeys.length > 0
 }>;
 
 function loadConfig(): Config {
@@ -161,7 +160,6 @@ function loadConfig(): Config {
     geminiApiKeys: keys,
     keyCooldownAfter429Ms: KEY_COOLDOWN_AFTER_429_MS,
     keyBadTtlMs: KEY_BAD_TTL_MS,
-    keyPathEnabled: keys.length > 0,
   });
 }
 

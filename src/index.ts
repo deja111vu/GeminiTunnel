@@ -18,22 +18,23 @@ async function main(): Promise<void> {
   const pool = new AccountPool({ store, refresher, cooldownMs: config.cooldownAfter429Ms });
   const client = new CodeAssistClient();
 
-  // API-key path. Built only when the operator configured at least one
-  // key; otherwise the middleware is skipped and only the OAuth path
-  // is exposed. The keyPool is intentionally also gated on
-  // keyPathEnabled so a half-configured deployment doesn't accidentally
-  // register the middleware.
-  let keyPool: KeyPool | undefined;
-  let keyClient: KeyClient | undefined;
-  if (config.keyPathEnabled) {
-    keyPool = new KeyPool({
-      keys: [...config.geminiApiKeys],
-      cooldownMs: config.keyCooldownAfter429Ms,
-      badTtlMs: config.keyBadTtlMs,
-    });
-    keyClient = new KeyClient({ timeoutMs: config.requestTimeoutMs });
-    logger.info({ keyCount: config.geminiApiKeys.length }, 'Gemini API key path enabled');
-  }
+  // API-key path. The pool is ALWAYS constructed, even when empty,
+  // so the admin UI can add keys at runtime and have them take
+  // effect on the next request. `seedApiKeysFromEnv` is a no-op
+  // once the table is non-empty, so the DB is the source of truth
+  // after first boot and GEMINI_API_KEYS is only a bootstrap hint.
+  const seeded = store.seedApiKeysFromEnv(config.geminiApiKeys);
+  const keyRows = store.listApiKeysWithSecret();
+  const keyPool = new KeyPool({
+    keys: keyRows.filter((k) => k.enabled).map((k) => k.key),
+    cooldownMs: config.keyCooldownAfter429Ms,
+    badTtlMs: config.keyBadTtlMs,
+  });
+  const keyClient = new KeyClient({ timeoutMs: config.requestTimeoutMs });
+  logger.info(
+    { seeded, totalKeys: keyRows.length },
+    'gemini api key pool loaded',
+  );
 
   const app = createApp({ pool, store, keyPool, keyClient, config });
 
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
     refresher,
     encryptionKey: config.accountsEncryptionKey,
     adminToken: config.adminToken,
+    keyPool,
   });
 
   const poller = new QuotaPoller({

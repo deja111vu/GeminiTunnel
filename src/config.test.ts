@@ -65,10 +65,10 @@ describe('config', () => {
     process.env.GEMINI_API_KEYS = `${validKey},${validKey},invalid,short`;
     const { config } = await import('./config.js');
     expect(config.geminiApiKeys).toEqual([validKey]);
-    expect(config.keyPathEnabled).toBe(true);
+    expect(config).not.toHaveProperty('keyPathEnabled');
   });
 
-  it('keyPathEnabled=false when GEMINI_API_KEYS empty/unset', async () => {
+  it('geminiApiKeys is [] when GEMINI_API_KEYS empty/unset', async () => {
     vi.resetModules();
     process.env.ADMIN_TOKEN = REQUIRED_ENV.ADMIN_TOKEN;
     process.env.ACCOUNTS_ENCRYPTION_KEY = REQUIRED_ENV.ACCOUNTS_ENCRYPTION_KEY;
@@ -76,7 +76,6 @@ describe('config', () => {
     delete process.env.GEMINI_API_KEYS;
     const { config } = await import('./config.js');
     expect(config.geminiApiKeys).toEqual([]);
-    expect(config.keyPathEnabled).toBe(false);
   });
 
   it('uses defaults for KEY_COOLDOWN_AFTER_429_MS and KEY_BAD_TTL_MS', async () => {

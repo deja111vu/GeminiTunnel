@@ -26,7 +26,6 @@ describe('server', () => {
     const keyClient = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com' });
     const cfg: Config = {
       ...({} as Config),
-      keyPathEnabled: true,
       geminiApiKeys: [K1],
       keyCooldownAfter429Ms: 60_000,
       keyBadTtlMs: 86_400_000,
@@ -155,5 +154,32 @@ describe('server', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('key_in_query_string_forbidden');
+  });
+
+  it('empty KeyPool + x-goog-api-key -> 503 all_keys_unavailable (key path is always mounted)', async () => {
+    // Invariant pinned by the dynamic-api-keys work: the pool is built
+    // even when it is empty (so the admin UI can fill it at runtime),
+    // and a key-path request against an empty pool surfaces as 503 —
+    // NOT as a silent fallthrough to the OAuth handler.
+    const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+    const keyClient = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com' });
+    const cfg = {
+      geminiApiKeys: [],
+      keyCooldownAfter429Ms: 60_000,
+      keyBadTtlMs: 86_400_000,
+      switchBudget: 1,
+    } as unknown as Config;
+    const app = createApp({ keyPool, keyClient, config: cfg });
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(JSON.stringify({ model: 'gemini-2.5-pro', messages: [] }).length),
+        'x-goog-api-key': 'AIzaSyA' + 'a'.repeat(32),
+      },
+      body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [] }),
+    });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe('all_keys_unavailable');
   });
 });

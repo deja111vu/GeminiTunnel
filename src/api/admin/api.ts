@@ -10,6 +10,7 @@ import { finalizeLogin, FinalizeError } from '../../oauth/finalize.js';
 import { requireAdmin, setAdminCookie, clearAdminCookie } from './auth.js';
 import type { Store } from '../../accounts/store.js';
 import type { RefresherLike } from '../../accounts/pool.js';
+import type { KeyPool } from '../gemini/keyPool.js';
 
 const StartBody = z.object({ accountLabel: z.string().min(1).max(64).default('default') });
 const ExchangeBody = z.object({
@@ -24,6 +25,7 @@ export interface AdminApiDeps {
   refresher: RefresherLike;
   encryptionKey: string;
   adminToken: string;
+  keyPool: KeyPool;
 }
 
 export function handleAdminApi({
@@ -32,6 +34,7 @@ export function handleAdminApi({
   refresher,
   encryptionKey,
   adminToken,
+  keyPool,
 }: AdminApiDeps): void {
   // Login + logout are NOT under requireAdmin — they're how the user
   // gets a session in the first place. We register them before the

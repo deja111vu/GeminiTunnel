@@ -133,14 +133,18 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
   // rejection runs before any handler that might log the raw URL.
   app.use('/v1/*', rejectKeyInQuery());
 
-  // API-key path dispatcher. Always register when keyPool+keyClient are
-  // present, regardless of `keyPathEnabled`, so `?key=AIza...` and
-  // malformed headers are rejected with 400 instead of falling through.
+  // API-key path dispatcher. Mounted whenever keyPool+keyClient are
+  // present. `enabled` is hardcoded true: the pool is always built
+  // now (see the dynamic-api-keys spec), so the key path is always
+  // live and an empty pool surfaces as 503 all_keys_unavailable.
+  // That replaces the old 400 key_path_disabled for key-path clients
+  // on deployments with no keys. Requests WITHOUT x-goog-api-key
+  // still fall through to the OAuth handler, unchanged.
   if (deps.keyPool && deps.keyClient) {
     app.use(
       '/v1/chat/completions',
       keyOrOAuth({
-        enabled: cfg.keyPathEnabled,
+        enabled: true,
         pool: deps.keyPool,
         client: deps.keyClient,
         config: cfg,
