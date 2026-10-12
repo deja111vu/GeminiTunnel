@@ -309,3 +309,99 @@ describe('KeyPool', () => {
     expect(p.pick('modelC').key).not.toBe(K1);
   });
 });
+
+describe('KeyPool dynamic keys', () => {
+  let now = NOW;
+  beforeEach(() => { now = NOW; });
+
+  function makePool(keys: string[] = [K1, K2]) {
+    return new KeyPool({ keys, cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0, now: () => now });
+  }
+
+  it('addKey makes a new key pickable immediately (no jitter)', () => {
+    const p = new KeyPool({
+      keys: [K1], cooldownMs: 60_000, badTtlMs: 86_400_000,
+      jitterMs: 30_000, now: () => now,
+    });
+    p.addKey(K2);
+    // Jitter on boot would have parked K2 for up to 30s. Runtime
+    // adds must not: the operator just clicked Add.
+    expect(p.pick().key).toBe(K2);
+  });
+
+  it('addKey is a no-op for an already-present key', () => {
+    const p = makePool([K1]);
+    p.addKey(K1);
+    expect(p.summaryForAllModels().configured).toBe(1);
+  });
+
+  it('removeKey drops the key from pick()', () => {
+    const p = makePool([K1, K2]);
+    p.removeKey(K1);
+    const picks = [p.pick().key, p.pick().key, p.pick().key];
+    expect(picks.every((k) => k === K2)).toBe(true);
+  });
+
+  it('removeKey purges per-model cooldown for the key', () => {
+    const p = makePool([K1, K2]);
+    p.recordRateLimit(K1, 'gemini-2.5-pro', 60_000);
+    p.removeKey(K1);
+    p.addKey(K1);
+    now += 1;
+    const picks = [p.pick('gemini-2.5-pro').key, p.pick('gemini-2.5-pro').key];
+    expect(picks).toContain(K1);
+  });
+
+  it('removeKey purges bad state for the key', () => {
+    const p = makePool([K1, K2]);
+    p.markBad(K1);
+    p.removeKey(K1);
+    p.addKey(K1);
+    now += 1;
+    expect(p.pick().key).toBe(K1);
+  });
+
+  it('removeKey is a no-op for an unknown key', () => {
+    const p = makePool([K1]);
+    p.removeKey(K2);
+    expect(p.summaryForAllModels().configured).toBe(1);
+  });
+
+  it('addKey then removeKey leaves no stale candidate (AC7)', () => {
+    const p = makePool([K1]);
+    p.addKey(K2);
+    p.removeKey(K2);
+    now += 1;
+    const picks = [p.pick().key, p.pick().key, p.pick().key];
+    expect(picks.every((k) => k === K1)).toBe(true);
+  });
+
+  it('empty pool -> pick() throws NoKeyAvailableError(reason: unknown)', () => {
+    const p = makePool([]);
+    try {
+      p.pick();
+      expect.fail('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoKeyAvailableError);
+      expect((err as NoKeyAvailableError).reason).toBe('unknown');
+    }
+  });
+
+  it('recordRateLimit for a removed key is a no-op', () => {
+    const p = makePool([K1]);
+    p.removeKey(K1);
+    p.recordRateLimit(K1, 'modelA', 60_000);
+    p.addKey(K1);
+    now += 1;
+    expect(p.pick('modelA').key).toBe(K1);
+  });
+
+  it('markBad for a removed key is a no-op', () => {
+    const p = makePool([K1, K2]);
+    p.removeKey(K1);
+    p.markBad(K1);
+    p.addKey(K1);
+    now += 1;
+    expect(p.pick().key).toBe(K1);
+  });
+});

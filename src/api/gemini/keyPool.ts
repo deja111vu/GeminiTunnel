@@ -48,7 +48,9 @@ function cmpKey(a: string, b: string): number {
 }
 
 export class KeyPool {
-  private readonly keys: readonly string[];
+  // Mutable: addKey/removeKey mutate this after construction. Callers
+  // that pass `keys` at construction still work unchanged.
+  private readonly keys: string[];
   private readonly cooldownMs: number;
   private readonly badTtlMs: number;
   private readonly jitterMs: number;
@@ -65,7 +67,7 @@ export class KeyPool {
   private readonly nextAvailableAfter = new Map<string, number>();
 
   constructor(opts: KeyPoolOptions) {
-    this.keys = Object.freeze([...opts.keys]);
+    this.keys = [...opts.keys];
     this.cooldownMs = opts.cooldownMs;
     this.badTtlMs = opts.badTtlMs;
     this.jitterMs = opts.jitterMs ?? 30_000;
@@ -81,6 +83,28 @@ export class KeyPool {
     for (const k of this.keys) {
       this.nextAvailableAfter.set(k, t + Math.floor(Math.random() * this.jitterMs));
     }
+  }
+
+  private known(key: string): boolean {
+    return this.keys.includes(key);
+  }
+
+  // Runtime add: NO startup jitter. Jitter only spreads the initial
+  // boot wave (see the file header); a key the operator just added
+  // must be pickable on the very next request.
+  addKey(key: string): void {
+    if (this.known(key)) return;
+    this.keys.push(key);
+  }
+
+  removeKey(key: string): void {
+    const i = this.keys.indexOf(key);
+    if (i === -1) return;
+    this.keys.splice(i, 1);
+    this.cooldownByModel.delete(key);
+    this.badUntil.delete(key);
+    this.nextAvailableAfter.delete(key);
+    this.seqByKey.delete(key);
   }
 
   pick(model?: string): PickedKey {
@@ -132,6 +156,7 @@ export class KeyPool {
   }
 
   recordRateLimit(key: string, model: string, durationMs?: number): void {
+    if (!this.known(key)) return;
     const t = this.now();
     const newUntil = t + (durationMs ?? this.cooldownMs);
     let m = this.cooldownByModel.get(key);
@@ -174,6 +199,7 @@ export class KeyPool {
   }
 
   markBad(key: string, durationMs?: number): void {
+    if (!this.known(key)) return;
     const t = this.now();
     this.badUntil.set(key, t + (durationMs ?? this.badTtlMs));
     // A "bad" key overrides any per-model cooldown for that key — when the
