@@ -28,6 +28,7 @@ describe('store schema', () => {
     expect(names).toContain('accounts');
     expect(names).toContain('account_quota_events');
     expect(names).toContain('account_quota_snapshots');
+    expect(names).toContain('proxy_client_key');
     store.close();
   });
 
@@ -253,5 +254,100 @@ describe('api_keys CRUD', () => {
     const list = store.listApiKeys();
     expect(list).toHaveLength(1);
     expect(list[0].label).toBe('persisted');
+  });
+});
+
+describe('proxy_client_key singleton', () => {
+  let tmp: string;
+  let store: ReturnType<typeof createStore>;
+  const SECRET = 'a'.repeat(64);
+  const ROTATED = 'b'.repeat(64);
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'gt-'));
+    store = createStore(tmp, KEY);
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('getClientKey returns null when no row exists', () => {
+    expect(store.getClientKey()).toBeNull();
+    expect(store.getClientKeyWithSecret()).toBeNull();
+  });
+
+  it('setClientKey inserts; getClientKey returns metadata without the secret', () => {
+    const meta = store.setClientKey(SECRET);
+    expect(meta.keyId).toBe(keyIdFor(SECRET));
+    expect(meta.createdAt).toBeGreaterThan(0);
+    expect(meta.updatedAt).toBe(meta.createdAt);
+    const fetched = store.getClientKey();
+    expect(fetched).not.toBeNull();
+    expect(fetched).not.toHaveProperty('key');
+    expect(JSON.stringify(fetched)).not.toContain(SECRET);
+  });
+
+  it('getClientKeyWithSecret decrypts the stored key', () => {
+    store.setClientKey(SECRET);
+    const withSecret = store.getClientKeyWithSecret();
+    expect(withSecret?.key).toBe(SECRET);
+    expect(withSecret?.keyId).toBe(keyIdFor(SECRET));
+  });
+
+  it('setClientKey twice rotates in place: createdAt preserved, updatedAt moves forward', async () => {
+    const first = store.setClientKey(SECRET);
+    // Sleep 2ms so updatedAt is strictly greater than createdAt.
+    await new Promise((r) => setTimeout(r, 5));
+    const second = store.setClientKey(ROTATED);
+    expect(second.createdAt).toBe(first.createdAt);
+    expect(second.updatedAt).toBeGreaterThan(first.updatedAt);
+    expect(second.keyId).toBe(keyIdFor(ROTATED));
+    const list = store.db
+      .prepare('SELECT COUNT(*) AS n FROM proxy_client_key')
+      .get() as { n: number };
+    expect(list.n).toBe(1);
+    expect(store.getClientKeyWithSecret()?.key).toBe(ROTATED);
+  });
+
+  it('clearClientKey removes the row; second call returns false', () => {
+    store.setClientKey(SECRET);
+    expect(store.clearClientKey()).toBe(true);
+    expect(store.getClientKey()).toBeNull();
+    expect(store.clearClientKey()).toBe(false);
+  });
+
+  it('CHECK(id=1) rejects a hand-inserted second row', () => {
+    store.setClientKey(SECRET);
+    expect(() =>
+      store.db
+        .prepare(
+          'INSERT INTO proxy_client_key (id, key_id, key_ciphertext, created_at, updated_at) VALUES (2, ?, ?, ?, ?)',
+        )
+        .run('x', Buffer.from('x'), Date.now(), Date.now()),
+    ).toThrowError(/CHECK/);
+  });
+
+  it('seedClientKeyFromEnv inserts the env value when the table is empty', () => {
+    expect(store.seedClientKeyFromEnv(SECRET)).toBe(true);
+    expect(store.getClientKeyWithSecret()?.key).toBe(SECRET);
+  });
+
+  it('seedClientKeyFromEnv is a no-op when the row already exists', () => {
+    store.setClientKey(SECRET);
+    expect(store.seedClientKeyFromEnv(ROTATED)).toBe(false);
+    expect(store.getClientKeyWithSecret()?.key).toBe(SECRET);
+  });
+
+  it('seedClientKeyFromEnv(undefined) is a no-op', () => {
+    expect(store.seedClientKeyFromEnv(undefined)).toBe(false);
+    expect(store.getClientKey()).toBeNull();
+  });
+
+  it('proxy_client_key survives a close/reopen cycle (persisted)', () => {
+    store.setClientKey(SECRET);
+    store.close();
+    store = createStore(tmp, KEY);
+    expect(store.getClientKeyWithSecret()?.key).toBe(SECRET);
   });
 });

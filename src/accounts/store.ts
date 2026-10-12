@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
+
+-- Singleton: stores the single admin-set Bearer token that guards /v1/*.
+-- Absence => proxy is closed (every request 401s). The CHECK enforces the
+-- one-row invariant at the DB layer in case anyone bypasses the Store API.
+CREATE TABLE IF NOT EXISTS proxy_client_key (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  key_id TEXT NOT NULL,
+  key_ciphertext BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 interface Row {
@@ -150,6 +161,20 @@ export interface ApiKeyWithSecret extends ApiKey {
   key: string;
 }
 
+// Singleton: at most one admin-set proxy access token. The store
+// treats the row as opaque to anyone who has not proven admin
+// authority (UI / admin API); the runtime middleware only ever
+// receives `getClientKeyWithSecret()`'s decrypted `key` field.
+export interface ProxyClientKey {
+  keyId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProxyClientKeyWithSecret extends ProxyClientKey {
+  key: string;
+}
+
 export class ApiKeyConflictError extends Error {
   constructor(public readonly conflict: 'label_taken' | 'key_already_registered') {
     super(conflict);
@@ -210,6 +235,11 @@ export interface Store {
   removeApiKey: (id: number) => boolean;
   setApiKeyEnabled: (id: number, enabled: boolean) => ApiKey | null;
   seedApiKeysFromEnv: (keys: readonly string[]) => number;
+  getClientKey: () => ProxyClientKey | null;
+  getClientKeyWithSecret: () => ProxyClientKeyWithSecret | null;
+  setClientKey: (key: string) => ProxyClientKey;
+  clearClientKey: () => boolean;
+  seedClientKeyFromEnv: (key: string | undefined) => boolean;
 }
 
 export function createStore(dataDir: string, encryptionKeyHex: string = ''): Store {
@@ -303,6 +333,17 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
     'UPDATE api_keys SET enabled = ?, disabled_at = ? WHERE id = ?',
   );
   const countApiKeysStmt = db.prepare('SELECT COUNT(*) AS n FROM api_keys');
+
+  // proxy_client_key: UPSERT keeps the singleton invariant (id=1). When the
+  // row exists, REPLACE drops the old ciphertext atomically; when it does
+  // not, REPLACE behaves as INSERT. Either way the CHECK(id=1) is satisfied.
+  const upsertClientKeyStmt = db.prepare(`
+    INSERT OR REPLACE INTO proxy_client_key (id, key_id, key_ciphertext, created_at, updated_at)
+    VALUES (1, @keyId, @ciphertext, @createdAt, @updatedAt)
+  `);
+  const getClientKeyStmt = db.prepare('SELECT key_id, created_at, updated_at FROM proxy_client_key WHERE id = 1');
+  const getClientKeyWithSecretStmt = db.prepare('SELECT key_id, key_ciphertext, created_at, updated_at FROM proxy_client_key WHERE id = 1');
+  const clearClientKeyStmt = db.prepare('DELETE FROM proxy_client_key WHERE id = 1');
 
   const requireKey = (): void => {
     if (!encryptionKeyHex) throw new Error('encryption key required for write ops');
@@ -514,6 +555,55 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
         }
       }
       return inserted;
+    },
+
+    getClientKey() {
+      const r = getClientKeyStmt.get() as { key_id: string; created_at: number; updated_at: number } | undefined;
+      if (!r) return null;
+      return { keyId: r.key_id, createdAt: r.created_at, updatedAt: r.updated_at };
+    },
+
+    getClientKeyWithSecret() {
+      if (!encryptionKeyHex) return null;
+      const r = getClientKeyWithSecretStmt.get() as
+        | { key_id: string; key_ciphertext: Buffer; created_at: number; updated_at: number }
+        | undefined;
+      if (!r) return null;
+      return {
+        keyId: r.key_id,
+        key: dec(r.key_ciphertext, encryptionKeyHex).toString('utf8'),
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      };
+    },
+
+    setClientKey(key) {
+      requireKey();
+      const now = Date.now();
+      // Preserve created_at across rotations; only updated_at moves forward.
+      const existing = getClientKeyStmt.get() as { created_at: number } | undefined;
+      const createdAt = existing?.created_at ?? now;
+      upsertClientKeyStmt.run({
+        keyId: keyIdFor(key),
+        ciphertext: enc(key, encryptionKeyHex),
+        createdAt,
+        updatedAt: now,
+      });
+      return { keyId: keyIdFor(key), createdAt, updatedAt: now };
+    },
+
+    clearClientKey() {
+      return clearClientKeyStmt.run().changes > 0;
+    },
+
+    seedClientKeyFromEnv(key) {
+      if (!key) return false;
+      // Same one-shot semantics as seedApiKeysFromEnv: the operator's
+      // explicit env value gets installed exactly once; thereafter the
+      // admin UI owns the row.
+      if (getClientKeyStmt.get()) return false;
+      this.setClientKey(key);
+      return true;
     },
   };
 }
