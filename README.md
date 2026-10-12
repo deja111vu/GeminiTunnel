@@ -31,8 +31,8 @@ OpenAI-совместимый прокси для **Google Code Assist / Gemini 
 - 🪶 **Зависимости** — Node 22, `better-sqlite3`, `hono`, `pino`,
   `google-auth-library`. Никаких внешних сервисов.
 - 🔑 **Gemini API key path (опционально)** — параллельно с OAuth
-  можно подключить прямые AIza-ключи из [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-  Клиент выбирает путь заголовком `x-goog-api-key: AIza…`; без
+  можно подключить прямые AQ.-ключи из [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+  Клиент выбирает путь заголовком `x-goog-api-key: AQ.Ab…`; без
   заголовка работает OAuth, как раньше. Round-robin по ключам,
   per-model cooldown, отмена через AbortSignal. См.
   [«Gemini API key path»](#-gemini-api-key-path-опционально).
@@ -131,14 +131,14 @@ Settings → Models → OpenAI API Key:
 Параллельно с OAuth прокси умеет работать с прямыми ключами
 [Google Gemini API](https://aistudio.google.com/apikey). Полезно,
 когда не хочется логиниться через браузер или держать refresh-токены
-в БД: задал `GEMINI_API_KEYS=AIza…,AIza…` — и готово.
+в БД: задал `GEMINI_API_KEYS=AQ.Ab…,AQ.Ab…` — и готово.
 
 ### Что добавить в `.env`
 
 ```bash
-# CSV из AIza-ключей. Пусто — key-путь выключен, прокси работает
+# CSV из AQ.-ключей. Пусто — key-путь выключен, прокси работает
 # только в OAuth-режиме (поведение 2.0.x).
-GEMINI_API_KEYS=AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,AIzaSyByyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+GEMINI_API_KEYS=AQ.Abxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,AQ.Abyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 
 # Cooldown per-key per-model после 429. По умолчанию 60с.
 # KEY_COOLDOWN_AFTER_429_MS=60000
@@ -152,10 +152,10 @@ GEMINI_API_KEYS=AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,AIzaSyByyyyyyyyyyyyyyyyy
 Клиент выбирает путь заголовком. Без заголовка — OAuth, как раньше.
 
 ```bash
-# Claude Code с key-путем: передаем AIza-ключ в x-goog-api-key
+# Claude Code с key-путем: передаем AQ.-ключ в x-goog-api-key
 curl -X POST http://VPS_IP:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "x-goog-api-key: AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "x-goog-api-key: AQ.Abxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}'
 ```
 
@@ -200,10 +200,10 @@ curl -X POST http://VPS_IP:8000/v1/chat/completions \
 
 ### Безопасность
 
-- **AIza-ключи в URL → 400**. Запрос с `?key=AIza…` всегда
+- **AQ.-ключи в URL → 400**. Запрос с `?key=AQ.Ab…` всегда
   отбивается (даже при `KEY_PATH_ENABLED=false`), чтобы ключи
   не попадали в access-логи, browser history и referer.
-- **AIza-ключи в логах → redact**. `x-goog-api-key` (и все
+- **AQ.-ключи в логах → redact**. `x-goog-api-key` (и все
   регистры) добавлены в pino redact paths. `Authorization` тоже.
 - **Один key-rotation цикл на запрос**. Если все ключи в cooldown
   или bad — 503 + `Retry-After`, без бесконечного перебора.

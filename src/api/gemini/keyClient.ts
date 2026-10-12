@@ -67,6 +67,11 @@ export class KeyClient {
   }
 
   private headers(key: string): Record<string, string> {
+    // FIXME: post-2026 AQ. keys via `Authorization: Bearer` may 401 on
+    // the OpenAI-compat endpoint. The regex (keyConfig.ts) accepts
+    // AQ., but Google may require `x-goog-api-key` for the new format.
+    // Tracked as Task 7.1; for now the Bearer path is preserved for
+    // AIza-style keys still in rotation. See plan 2026-10-10-dynamic-api-keys.
     return {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',

@@ -110,7 +110,7 @@ RUN find /app/dist -name '*.js.map' -delete
 # Defense-in-depth: even though tsconfig.json excludes `*.test.ts` from
 # the build, sweep the runtime image for any test artifacts that might
 # have leaked through (a future contributor re-enabling emit, an old
-# dist tree, etc.). Test files contain hardcoded AIza-shaped placeholders
+# dist tree, etc.). Test files contain hardcoded AQ.Ab-shaped placeholders
 # that match the production regex and have no business being readable
 # inside the container.
 RUN find /app/dist \( -name '*.test.js' -o -name '*.spec.js' -o -name '*.test.js.map' -o -name '*.spec.js.map' \) -delete
