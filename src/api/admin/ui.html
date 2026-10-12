@@ -63,6 +63,7 @@
 <nav>
   <button data-tab="accounts" class="active">Accounts</button>
   <button data-tab="keys">API Keys</button>
+  <button data-tab="proxy">Proxy Access</button>
   <button data-tab="quota">Quota</button>
   <button data-tab="logs">Logs</button>
 </nav>
@@ -86,6 +87,23 @@
       <button class="act" type="submit">Add</button>
     </form>
     <div id="keys-table"><div class="empty">loading…</div></div>
+  </section>
+  <section id="panel-proxy" class="panel">
+    <div id="proxy-status"><div class="empty">loading…</div></div>
+    <div style="margin-top:1rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+      <button class="act" id="proxy-generate">Generate new token</button>
+    </div>
+    <form id="proxy-rotate" style="margin-top:1rem;display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+      <label style="display:flex;flex-direction:column;gap:0.25rem;flex:1;min-width:280px">
+        <span style="color:#9aa0a6;font-size:12px">Rotate: paste a new token (≥16 chars, URL-safe)</span>
+        <input id="proxy-rotate-value" placeholder="paste token" autocomplete="off" required>
+      </label>
+      <button class="act" type="submit">Rotate</button>
+    </form>
+    <div style="margin-top:1rem">
+      <button class="act danger" id="proxy-remove">Remove token (close proxy)</button>
+    </div>
+    <pre id="proxy-once" style="margin-top:1rem;display:none"></pre>
   </section>
   <section id="panel-quota" class="panel">
     <select id="quota-account"><option>loading…</option></select>
@@ -158,6 +176,7 @@ document.querySelectorAll('nav button').forEach((btn) => {
     $('#panel-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'quota') loadQuota();
     if (btn.dataset.tab === 'keys') loadKeys();
+    if (btn.dataset.tab === 'proxy') loadProxyToken();
   });
 });
 $('#save-token').addEventListener('click', async () => {
@@ -353,6 +372,64 @@ async function loadQuota() {
   } catch (e) { toast(e.message, true); }
 }
 $('#quota-account').addEventListener('change', loadQuota);
+
+// Proxy Access — admin-set bearer token gating /v1/*. The proxy is
+// "closed always" by default (no token → 401); the env-bootstrap
+// (CLIENT_API_KEY) seeds the DB on first boot, after which the DB is
+// the source of truth and the UI is the only way to rotate.
+async function loadProxyToken() {
+  try {
+    const meta = await api('/admin/api/proxy-token');
+    if (!meta.hasSecret) {
+      $('#proxy-status').innerHTML = '<div class="empty">no token set — proxy is <b>closed</b>. Generate or rotate to open.</div>';
+      return;
+    }
+    $('#proxy-status').innerHTML = `
+      <div><b>status:</b> <span class="pill active">open</span></div>
+      <div style="margin-top:0.5rem"><b>keyId:</b> <code>${escapeHtml(meta.keyId)}</code></div>
+      <div><b>created:</b> ${fmtTime(meta.createdAt)}</div>
+      <div><b>updated:</b> ${fmtTime(meta.updatedAt)}</div>
+    `;
+  } catch (e) { toast(e.message, true); }
+}
+function showProxyOnce(key) {
+  const el = $('#proxy-once');
+  el.textContent = key;
+  el.style.display = 'block';
+  toast('copy this token now — it will not be shown again');
+  // Best-effort clipboard copy; the visible pre is the source of truth.
+  navigator.clipboard?.writeText(key).catch(() => {});
+  // Auto-clear after 60s so a left-open tab doesn't keep plaintext
+  // on screen. The token still works — only this view hides it.
+  setTimeout(() => { el.style.display = 'none'; el.textContent = ''; }, 60_000);
+}
+$('#proxy-generate').addEventListener('click', async () => {
+  if (!confirm('Generate a new proxy token? Any existing token will be rotated.')) return;
+  try {
+    const out = await api('/admin/api/proxy-token/generate', { method: 'POST' });
+    showProxyOnce(out.key);
+    loadProxyToken();
+  } catch (e) { toast(e.message, true); }
+});
+$('#proxy-rotate').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const key = $('#proxy-rotate-value').value.trim();
+  if (!key) { toast('paste a token', true); return; }
+  try {
+    await api('/admin/api/proxy-token', { method: 'PUT', body: JSON.stringify({ key }) });
+    $('#proxy-rotate-value').value = '';
+    toast('rotated');
+    loadProxyToken();
+  } catch (e) { toast(e.message, true); }
+});
+$('#proxy-remove').addEventListener('click', async () => {
+  if (!confirm('Remove the proxy token? The proxy will be CLOSED until a new one is set.')) return;
+  try {
+    await api('/admin/api/proxy-token', { method: 'DELETE' });
+    toast('removed');
+    loadProxyToken();
+  } catch (e) { toast(e.message, true); }
+});
 
 loadAccounts();
 </script>

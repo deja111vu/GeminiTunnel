@@ -31,5 +31,15 @@ describe('serveAdminUi', () => {
     expect(html).toContain('id="add-key-form"');
     expect(html).toContain('/admin/api/keys');
   });
+
+  it('serves the Proxy Access tab markup', async () => {
+    const app = new Hono();
+    serveAdminUi(app);
+    const res = await app.request('/admin');
+    const html = await res.text();
+    expect(html).toContain('data-tab="proxy"');
+    expect(html).toContain('id="panel-proxy"');
+    expect(html).toContain('/admin/api/proxy-token');
+  });
 });
 
