@@ -38,8 +38,10 @@ export function parseApiKeys(envValue: string | undefined): readonly string[] {
 // correlate which suffix belongs to which operator/model. SHA-256 of
 // the full key, truncated to 8 hex chars, is:
 //   - stable across log lines (same key -> same id within a process)
-//   - not reversible in any practical sense (64^44 work to find a
-//     preimage; no key disclosure from the id alone)
+//   - not reversible in any practical sense: 64^N work to find a
+//     preimage for an N-char body (N ≥ 35 per KEY_RE); even at the
+//     documented minimum body length this is computationally infeasible.
+//     no key disclosure from the id alone.
 //   - 32 bits of collision resistance, enough for a per-process log
 //     channel where N is the configured key count (typically <100)
 //
