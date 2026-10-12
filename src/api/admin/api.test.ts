@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { createStore, type Store } from '../../accounts/store.js';
 import { KeyPool } from '../gemini/keyPool.js';
 import { handleAdminApi } from './api.js';
+import { resetProxyTokenStoreForTests } from './proxyTokenStore.js';
 
 const KEY = 'a'.repeat(64);
 const ADMIN = 'b'.repeat(64);
@@ -50,6 +51,12 @@ describe('handleAdminApi', () => {
   beforeEach(() => {
     tmp = mkdtempSync(path.join(tmpdir(), 'gt-'));
     store = createStore(tmp, KEY);
+    // The proxy-token mirror is a module singleton. Without resetting
+    // it, a token set in one test bleeds into the next (e.g. test
+    // order can leave a key in the mirror that then makes
+    // 'clears on rotate' look sticky). The dedicated test file for
+    // the mirror uses the same hook.
+    resetProxyTokenStoreForTests();
     getTokenMock.mockReset();
     fetchMock.mockReset();
     globalThis.fetch = fetchMock as unknown as typeof fetch;

@@ -52,9 +52,13 @@ export interface AdminApiDeps {
   encryptionKey: string;
   adminToken: string;
   keyPool: KeyPool;
-  // Optional: when omitted, proxy-token endpoints update only the DB
-  // (useful for tests and for callers that don't need the in-memory
-  // mirror). Production wiring (Step 8.6) always passes it.
+  // In-memory mirror of the proxy access token. Optional for test
+  // ergonomics (callers can pass `getProxyTokenStore()` explicitly or
+  // rely on the default below). The default is the same module
+  // singleton that `createApp` reads, so production wiring always
+  // has PUT/generate/DELETE write to the same mirror the /v1/*
+  // middleware reads on every request. Wiring at boot lives in
+  // `src/index.ts` (Step 8.6).
   proxyTokenStore?: ProxyTokenStore;
 }
 

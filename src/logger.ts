@@ -23,6 +23,14 @@ const REDACT_PATHS = [
   'adminToken',
   'accountsEncryptionKey',
   'googleOauthClientSecret',
+  // The bootstrap CLIENT_API_KEY env var. It is a one-shot hint and
+  // is no longer consulted at runtime, but the env value lives at
+  // `config.clientApiKey` — a bare `clientApiKey` path would miss it
+  // (pino redact paths are exact, not recursive). The active token
+  // lives in the in-memory mirror and never reaches this struct, so
+  // only the env value needs redaction. Matches the existing
+  // `config.geminiApiKeys` pattern.
+  'config.clientApiKey',
   // Bracket notation for header paths (pino's docs recommend explicit
   // bracket form for header names that contain hyphens).
   'req.headers["authorization"]',

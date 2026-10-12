@@ -38,10 +38,19 @@ const oauthSecret = z
   .min(20, 'must be at least 20 chars (real GOCSPX- secrets are ~35)')
   .refine((s) => !/^(your_|<.+>).*$/i.test(s), 'placeholder value not allowed; paste the real secret');
 
-// CLIENT_API_KEY: optional. When set, /v1/chat/* and /v1/models require
-// Authorization: Bearer <key> to match. When unset, the proxy relies on
-// external auth (Cloudflare Access, firewall, mTLS) — that's the
-// default for the published VPS-deploy use case.
+// CLIENT_API_KEY: optional BOOTSTRAP HINT. Read once at startup to
+// seed the in-memory proxy-token mirror when the DB has no row yet
+// (see seedProxyTokenStore in src/api/admin/proxyTokenStore.ts). At
+// runtime, /v1/chat/* and /v1/models are gated on the mirror's
+// current value — NOT on this env var directly. The first admin
+// Generate/Rotate/Remove through the UI replaces the env value with
+// a DB-stored token, and the env value is no longer consulted.
+//
+// The previous "no CLIENT_API_KEY = proxy is open" posture is gone:
+// if neither the env nor the DB has a token, the proxy is closed and
+// /v1/* returns 401. Operators who previously relied on
+// external-only auth (Cloudflare Access, firewall, mTLS) must
+// bootstrap a token before exposing /v1/*.
 const clientKey = z
   .string()
   .min(16, 'CLIENT_API_KEY must be at least 16 chars when set')

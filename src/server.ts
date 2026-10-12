@@ -9,6 +9,7 @@ import type { KeyPool } from './api/gemini/keyPool.js';
 import type { AccountPool } from './accounts/pool.js';
 import type { Store } from './accounts/store.js';
 import type { Config } from './config.js';
+import type { ProxyTokenStore } from './api/admin/proxyTokenStore.js';
 
 // 4 MiB. The OpenAI-compatible chat body caps (1 MiB content, 256
 // messages, 64 tools) easily fit; anything above 4 MiB is either
@@ -65,24 +66,32 @@ function bodyCap(c: import('hono').Context, next: import('hono').Next): Promise<
   return next();
 }
 
-// CLIENT_API_KEY (optional): if set, gates /v1/chat/* and /v1/models
-// on a bearer token that matches byte-for-byte. If unset, the proxy
-// relies on external auth (Cloudflare Access, firewall, mTLS) —
-// the documented deployment posture.
-function requireClientKey(expected: string | undefined): import('hono').MiddlewareHandler {
-  if (!expected) {
-    return async (_c, next) => {
-      await next();
-    };
-  }
-  const expectedBuf = Buffer.from(expected, 'utf8');
+// Proxy-token gate for /v1/chat/* and /v1/models. The `getCurrent`
+// getter is called on every request so admin-UI Generate/Rotate/Remove
+// take effect without rebuilding the app.
+//
+// CLOSED ALWAYS: the middleware never no-ops. When `getCurrent()`
+// returns undefined (no token set anywhere — neither in the env
+// bootstrap nor in the admin DB row), every /v1/* request is rejected
+// with 401. The proxy is never silently open to anonymous traffic:
+// the previous "no CLIENT_API_KEY = pass through" posture is gone.
+// Operators who want external-auth-only deployments must either set
+// a token (env or admin) or keep a reverse proxy in front of an
+// internal-only listener.
+function requireClientKey(getCurrent: () => string | undefined): import('hono').MiddlewareHandler {
   return async (c, next) => {
+    const expected = getCurrent();
+    if (!expected) {
+      c.header('WWW-Authenticate', 'Bearer realm="gemini-tunnel"');
+      return c.json({ error: 'unauthorized' }, 401);
+    }
     const header = c.req.header('authorization') ?? '';
     const match = BEARER_RE.exec(header);
     if (!match) {
       c.header('WWW-Authenticate', 'Bearer realm="gemini-tunnel"');
       return c.json({ error: 'unauthorized' }, 401);
     }
+    const expectedBuf = Buffer.from(expected, 'utf8');
     const provided = Buffer.from(match[1], 'utf8');
     if (provided.length !== expectedBuf.length || !timingSafeEqual(provided, expectedBuf)) {
       return c.json({ error: 'forbidden' }, 403);
@@ -93,9 +102,12 @@ function requireClientKey(expected: string | undefined): import('hono').Middlewa
 }
 
 export interface CreateAppDeps {
-  // The OAuth deps remain optional so existing callers (and tests) that
-  // pass nothing continue to work — the proxy can run with neither
-  // path enabled (admin-only / health-only mode).
+  // The OAuth deps remain optional so existing callers (and tests)
+  // that pass nothing continue to work — the proxy can still serve
+  // /admin, /admin/api/*, and /health even with no upstream paths
+  // configured. /v1/*, however, is closed-always: with no token in
+  // the proxy-token mirror, /v1/* returns 401 regardless of whether
+  // any other path is wired.
   pool?: AccountPool;
   store?: Store;
   // The API-key path. When `keyPool` is provided, the middleware is
@@ -104,6 +116,13 @@ export interface CreateAppDeps {
   // and the OAuth handler.
   keyPool?: KeyPool;
   keyClient?: KeyClient;
+  // In-memory mirror of the proxy access token. The middleware reads
+  // it via a per-request getter so admin-UI mutations (Generate,
+  // Rotate, Remove) take effect without rebuilding the app. When
+  // omitted, the proxy is closed-always: every /v1/* request 401s.
+  // The mirror is seeded at boot by the caller (see
+  // `seedProxyTokenStore` in src/api/admin/proxyTokenStore.ts).
+  proxyTokenStore?: ProxyTokenStore;
   // Optional override for the config (used by tests); defaults to the
   // module-level singleton.
   config?: Config;
@@ -121,9 +140,12 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
   app.use('/v1/*', bodyCap);
   app.use('/admin/api/*', bodyCap);
 
-  // Optional client auth on the OpenAI surface. The middleware is a
-  // no-op when CLIENT_API_KEY is not configured.
-  const clientAuth = requireClientKey(cfg.clientApiKey);
+  // Proxy-token gate on the OpenAI surface. Closed-always: if the
+  // mirror is empty (or absent), every /v1/* request is rejected with
+  // 401 — the proxy is never silently open. The getter reads the
+  // current mirror value on every request, so admin-UI mutations are
+  // observed without rebuilding the app.
+  const clientAuth = requireClientKey(() => deps.proxyTokenStore?.get());
   app.use('/v1/*', clientAuth);
 
   // Reject `?key=AQ.Ab...` in the query string unconditionally — even

@@ -8,6 +8,10 @@ import { CodeAssistClient } from './api/codeassist/client.js';
 import { handleChatCompletion } from './api/openai/chat.js';
 import { handleListModels } from './api/openai/models.js';
 import { handleAdminApi, serveAdminUi } from './api/admin/api.js';
+import {
+  getProxyTokenStore,
+  seedProxyTokenStore,
+} from './api/admin/proxyTokenStore.js';
 import { QuotaPoller } from './quota/poller.js';
 import { KeyPool } from './api/gemini/keyPool.js';
 import { KeyClient } from './api/gemini/keyClient.js';
@@ -36,7 +40,18 @@ async function main(): Promise<void> {
     'gemini api key pool loaded',
   );
 
-  const app = createApp({ pool, store, keyPool, keyClient, config });
+  // Proxy access token. The in-memory mirror is what /v1/* auth reads
+  // (cheap, per-request), so it must be seeded BEFORE createApp is
+  // called. The DB is the source of truth; CLIENT_API_KEY is a
+  // bootstrap hint used only when the DB has no row yet.
+  const proxyTokenStore = getProxyTokenStore();
+  const proxyTokenSeed = seedProxyTokenStore(store, config.clientApiKey, proxyTokenStore);
+  logger.info(
+    { source: proxyTokenSeed.source, keyId: proxyTokenSeed.keyId },
+    'proxy token seed',
+  );
+
+  const app = createApp({ pool, store, keyPool, keyClient, config, proxyTokenStore });
 
   handleChatCompletion({ app, pool, client, store, config });
   handleListModels({ app });
@@ -48,6 +63,7 @@ async function main(): Promise<void> {
     encryptionKey: config.accountsEncryptionKey,
     adminToken: config.adminToken,
     keyPool,
+    proxyTokenStore,
   });
 
   const poller = new QuotaPoller({
