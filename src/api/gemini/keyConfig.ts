@@ -63,23 +63,6 @@ export function looksLikeApiKey(value: string): boolean {
   return KEY_RE.test(value);
 }
 
-// Auth header builder for the upstream Gemini call. Google split key
-// transport in 2026: legacy AIza Standard keys ride on
-// `Authorization: Bearer` against the OpenAI-compat endpoint; the
-// new AQ. Auth keys must ride on `x-goog-api-key` (works on the
-// native endpoint AND on the OpenAI-compat layer) because Bearer on
-// the OpenAI-compat layer returns 401/400 "Multiple authentication
-// credentials received". Selection is by prefix (rather than via
-// KEY_RE) so the two stay decoupled — the prefix is the load-bearing
-// signal for the auth method, while KEY_RE only constrains body
-// length/charset.
-export function authHeadersFor(key: string): Record<string, string> {
-  if (key.startsWith('AQ.')) {
-    return { 'x-goog-api-key': key };
-  }
-  return { Authorization: `Bearer ${key}` };
-}
-
 // Returns the first query-string value that matches a well-formed
 // Google API key (AQ. Auth format), regardless of the parameter name.
 // Used by the edge guard that rejects `?key=AQ.…` before it can leak

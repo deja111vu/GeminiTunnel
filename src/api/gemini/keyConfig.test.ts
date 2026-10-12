@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { parseApiKeys, KEY_RE, keyIdFor, findApiKeyInQuery, looksLikeApiKey, authHeadersFor } from './keyConfig.js';
+import { parseApiKeys, KEY_RE, keyIdFor, findApiKeyInQuery, looksLikeApiKey } from './keyConfig.js';
 
 // A valid Google API key (Auth format) is 40+ chars total: "AQ.Ab" (5)
 // + 35+ body chars. Body length is variable; 44 is a typical real-world
@@ -184,36 +184,6 @@ describe('findApiKeyInQuery', () => {
   it('returns the first key match when multiple are present', () => {
     const p = new URLSearchParams(`key=${K}&api_key=${K2}`);
     expect(findApiKeyInQuery(p)).toBe(K);
-  });
-});
-
-describe('authHeadersFor', () => {
-  // Google split key transport in 2026:
-  //   - AQ. Auth keys (post-2026): MUST ride on `x-goog-api-key`; Bearer
-  //     on the OpenAI-compat layer returns 401 / 400 "Multiple
-  //     authentication credentials received".
-  //   - AIza Standard keys (legacy, deprecated Sept 2026): still ride on
-  //     `Authorization: Bearer` — kept here for keys that haven't been
-  //     rotated yet.
-  // Selection is by prefix (`AQ.`) rather than via KEY_RE, because the
-  // prefix is the load-bearing signal for the auth method; KEY_RE only
-  // validates the body length/charset and accepts both `AQ.Ab…` and any
-  // hypothetical future shape that still starts with `AQ.`.
-  const AQ = 'AQ.Ab' + 'a'.repeat(48);
-  const AIza = 'AIzaSyA' + 'a'.repeat(32);
-
-  it('routes an AQ. key through x-goog-api-key (no Bearer)', () => {
-    expect(authHeadersFor(AQ)).toEqual({ 'x-goog-api-key': AQ });
-  });
-
-  it('routes a legacy AIza key through Authorization: Bearer', () => {
-    expect(authHeadersFor(AIza)).toEqual({ Authorization: `Bearer ${AIza}` });
-  });
-
-  it('does NOT mix both headers for a single key (Google rejects double-auth)', () => {
-    const h = authHeadersFor(AQ);
-    expect(h['Authorization']).toBeUndefined();
-    expect(h['x-goog-api-key']).toBe(AQ);
   });
 });
 

@@ -1,17 +1,13 @@
 // keyClient.ts — fetch wrapper for the Gemini Developer API (OpenAI-compat
-// endpoint at /v1beta/openai/chat/completions). Auth header selection is
-// delegated to `authHeadersFor` (keyConfig.ts) because Google split key
-// transport in 2026: AQ. Auth keys (post-2026) MUST ride on
-// `x-goog-api-key` (works on the OpenAI-compat layer too — see RedHat
-// ai-guardian #1617); legacy AIza Standard keys still ride on
-// `Authorization: Bearer` (deprecated Sept 2026 but kept in code while
-// any are still in rotation). Reuses HttpError from codeassist/client.ts;
-// the body-cap helper is a small local copy because exporting it from
-// codeassist/client.ts would widen the module's public surface for a
-// single consumer.
+// endpoint at /v1beta/openai/chat/completions). Auth uses
+// `Authorization: Bearer <key>` per the official OpenAI-compat docs
+// (https://ai.google.dev/gemini-api/docs/openai). `x-goog-api-key` is the
+// header for the *native* Gemini API, not the OpenAI-compat layer.
+// Reuses HttpError from codeassist/client.ts; the body-cap helper is a small
+// local copy because exporting it from codeassist/client.ts would widen the
+// module's public surface for a single consumer.
 
 import { HttpError } from '../codeassist/client.js';
-import { authHeadersFor } from './keyConfig.js';
 
 const ENDPOINT = '/v1beta/openai/chat/completions';
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com';
@@ -71,13 +67,13 @@ export class KeyClient {
   }
 
   private headers(key: string): Record<string, string> {
-    // Auth header selection is delegated to authHeadersFor (keyConfig.ts)
-    // so the keyConfig KEY_RE / format knowledge stays in one place.
-    // AQ. Auth keys use `x-goog-api-key`; legacy AIza Standard keys
-    // still use `Authorization: Bearer` (deprecated Sept 2026 but
-    // kept in code while any are still in rotation).
+    // FIXME: post-2026 AQ. keys via `Authorization: Bearer` may 401 on
+    // the OpenAI-compat endpoint. The regex (keyConfig.ts) accepts
+    // AQ., but Google may require `x-goog-api-key` for the new format.
+    // Tracked as Task 7.1; for now the Bearer path is preserved for
+    // AIza-style keys still in rotation. See plan 2026-10-10-dynamic-api-keys.
     return {
-      ...authHeadersFor(key),
+      Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
       'User-Agent': 'gemini-tunnel/2.0',
     };

@@ -71,10 +71,11 @@ describe('KeyClient', () => {
     }
   });
 
-  it('streamChat sends x-goog-api-key for AQ. keys (post-2026 auth path)', async () => {
+  it('streamChat sends Authorization: Bearer <key> header', async () => {
     let capturedHeaders: Record<string, string> = {};
     const fakeFetch: typeof fetch = async (_url, init) => {
-      capturedHeaders = init?.headers as Record<string, string>;
+      const h = init?.headers as Record<string, string>;
+      capturedHeaders = h;
       return new Response('data: {"x":1}\n\ndata: [DONE]\n\n', {
         status: 200,
         headers: { 'content-type': 'text/event-stream' },
@@ -86,28 +87,7 @@ describe('KeyClient', () => {
     });
     const iter = client.streamChat({ model: 'gemini-2.5-pro', messages: [], stream: true }, KEY);
     for await (const _chunk of iter) break;
-    expect(capturedHeaders['x-goog-api-key']).toBe(KEY);
-    expect(capturedHeaders['Authorization']).toBeUndefined();
-  });
-
-  it('streamChat sends Authorization: Bearer for legacy AIza keys', async () => {
-    let capturedHeaders: Record<string, string> = {};
-    const fakeFetch: typeof fetch = async (_url, init) => {
-      capturedHeaders = init?.headers as Record<string, string>;
-      return new Response('data: {"x":1}\n\ndata: [DONE]\n\n', {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      });
-    };
-    const client = new KeyClient({
-      baseUrl: 'https://generativelanguage.googleapis.com',
-      fetchImpl: fakeFetch,
-    });
-    const AIza = 'AIzaSyA' + 'a'.repeat(32);
-    const iter = client.streamChat({ model: 'gemini-2.5-pro', messages: [], stream: true }, AIza);
-    for await (const _chunk of iter) break;
-    expect(capturedHeaders['Authorization']).toBe(`Bearer ${AIza}`);
-    expect(capturedHeaders['x-goog-api-key']).toBeUndefined();
+    expect(capturedHeaders['Authorization']).toBe(`Bearer ${KEY}`);
   });
 
   it('streamChat yields SSE chunks verbatim', async () => {
