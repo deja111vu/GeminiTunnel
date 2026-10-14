@@ -29,6 +29,13 @@ export class AccountPool {
   // one (a picked id has seq>=1, an untouched id has seq=0).
   private nextPickSeq = 1;
   private readonly pickSeqById = new Map<number, number>();
+  // Operator-facing on/off switch (Task 1: accounts.enabled column).
+  // In-memory only; the DB is the source of truth, so a process restart
+  // rebuilds the disabled-set from store.listAccounts() at boot. The
+  // UnifiedPool (Task 3) is responsible for the cross-pool boot list —
+  // this method is the per-pool hook the UnifiedPool calls when it
+  // detects a PATCH.
+  private readonly disabledIds = new Set<number>();
 
   constructor({ store, refresher, cooldownMs }: AccountPoolOptions) {
     this.store = store;
@@ -47,6 +54,7 @@ export class AccountPool {
     const all = this.store.listAccounts();
     const eligible = all
       .filter((a) => a.status === 'active')
+      .filter((a) => this.disabledIds.has(a.id) === false)
       .filter((a) => a.cooldownUntil == null || a.cooldownUntil < now)
       .sort((a, b) => {
         const at = a.lastUsedAt ?? 0;
@@ -96,6 +104,14 @@ export class AccountPool {
 
   recordInvalid(accountId: number, lastError?: string): void {
     this.store.setStatus(accountId, 'invalid', lastError);
+  }
+
+  disable(id: number): void {
+    this.disabledIds.add(id);
+  }
+
+  enable(id: number): void {
+    this.disabledIds.delete(id);
   }
 
   recordIneligible(accountId: number, lastError?: string): void {

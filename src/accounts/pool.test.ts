@@ -193,3 +193,60 @@ describe('AccountPool', () => {
     expect(store.getAccount(a.id)!.status).toBe('active');
   });
 });
+
+describe('AccountPool disable/enable', () => {
+  let tmp: string;
+  let store: Store;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'gt-'));
+    store = createStore(tmp, KEY);
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function makeAccount(email: string) {
+    return store.addAccount({ email, refreshToken: `rt-${email}` });
+  }
+
+  function mockRefresher() {
+    return {
+      getAccessToken: vi.fn(async (id: number) => `tok-${id}`),
+      forceRefresh: vi.fn(async (id: number) => `tok-${id}`),
+    };
+  }
+
+  it('disable(id) excludes the account from pick()', async () => {
+    const a = makeAccount('a@e.com');
+    const b = makeAccount('b@e.com');
+    const pool = new AccountPool({ store, refresher: mockRefresher(), cooldownMs: 60_000 });
+    pool.disable(a.id);
+    const p = await pool.pick();
+    expect(p.accountId).toBe(b.id);
+  });
+
+  it('enable(id) re-adds a disabled account', async () => {
+    const a = makeAccount('a@e.com');
+    const b = makeAccount('b@e.com');
+    const pool = new AccountPool({ store, refresher: mockRefresher(), cooldownMs: 60_000 });
+    pool.disable(a.id);
+    await pool.pick(); // b
+    pool.enable(a.id);
+    // both eligible now; should not throw
+    const picks = new Set<number>();
+    for (let i = 0; i < 4; i++) {
+      const p = await pool.pick();
+      picks.add(p.accountId);
+    }
+    expect(picks.has(a.id)).toBe(true);
+    expect(picks.has(b.id)).toBe(true);
+  });
+
+  it('disable of a missing id is a silent no-op', () => {
+    const pool = new AccountPool({ store, refresher: mockRefresher(), cooldownMs: 60_000 });
+    expect(() => pool.disable(999)).not.toThrow();
+    expect(() => pool.enable(999)).not.toThrow();
+  });
+});
