@@ -19,6 +19,7 @@ export interface Account {
   tokenExpiresAt: number | null;
   createdAt: number;
   onboardedAt: number | null;
+  enabled: boolean;
 }
 
 export interface AddAccountArgs {
@@ -97,6 +98,14 @@ CREATE TABLE IF NOT EXISTS proxy_client_key (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+-- Task 1 (unified upstream pool): operator-facing enable/disable for
+-- OAuth accounts. Mirrors api_keys.enabled. NOT NULL DEFAULT 1 so
+-- existing rows from earlier deployments are enabled out of the box.
+-- Idempotent: ALTER TABLE … ADD COLUMN has no IF NOT EXISTS in
+-- SQLite, so the createStore wrapper runs the migrations block
+-- inside a try/catch that swallows the "duplicate column" error.
+ALTER TABLE accounts ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 `;
 
 interface Row {
@@ -114,6 +123,7 @@ interface Row {
   last_error: string | null;
   created_at: number;
   onboarded_at: number | null;
+  enabled: number;
 }
 
 function rowToAccount(r: Row): Account {
@@ -130,6 +140,7 @@ function rowToAccount(r: Row): Account {
     tokenExpiresAt: r.token_expires_at,
     createdAt: r.created_at,
     onboardedAt: r.onboarded_at,
+    enabled: r.enabled === 1,
   };
 }
 
@@ -213,6 +224,7 @@ export interface Store {
   setActiveToken: (id: number, accessToken: string, expiresAt: number) => void;
   setStatus: (id: number, status: AccountStatus, lastError?: string) => void;
   setCooldown: (id: number, until: number) => void;
+  setAccountEnabled: (id: number, enabled: boolean) => Account | null;
   touchUsed: (id: number) => void;
   recordQuotaEvent: (accountId: number, model: string, source: '429' | 'poll', resetAt?: number) => void;
   recordQuotaSnapshot: (
@@ -272,7 +284,16 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
   // Cost is a measurable (~5-15%) write slowdown, acceptable for this
   // workload (one row per refresh / quota event).
   db.pragma('secure_delete = ON');
-  db.exec(MIGRATIONS);
+  try {
+    db.exec(MIGRATIONS);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Idempotent ALTER TABLE ADD COLUMN: SQLite raises "duplicate
+    // column name: enabled" on the second open of a DB that already
+    // has the column. That's the expected and acceptable outcome —
+    // any other DDL error must surface.
+    if (!/duplicate column name/i.test(msg)) throw err;
+  }
   // better-sqlite3 creates data.db-wal and data.db-shm on first write;
   // tighten those to 0o600 too (WAL contains recent row pages, including
   // unencrypted-by-this-layer columns like email/status).
@@ -300,6 +321,9 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
   const updateTokenStmt = db.prepare('UPDATE accounts SET access_token_encrypted=?, token_expires_at=? WHERE id=?');
   const updateStatusStmt = db.prepare('UPDATE accounts SET status=?, last_error_at=?, last_error=? WHERE id=?');
   const updateCooldownStmt = db.prepare('UPDATE accounts SET cooldown_until=? WHERE id=?');
+  const updateAccountEnabledStmt = db.prepare(
+    'UPDATE accounts SET enabled = ? WHERE id = ?',
+  );
   const touchUsedStmt = db.prepare('UPDATE accounts SET last_used_at=? WHERE id=?');
   const insertQuotaEventStmt = db.prepare(
     'INSERT INTO account_quota_events (account_id, model, reset_at, source, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -415,6 +439,13 @@ export function createStore(dataDir: string, encryptionKeyHex: string = ''): Sto
 
     setCooldown(id, until) {
       updateCooldownStmt.run(until, id);
+    },
+
+    setAccountEnabled(id, enabled) {
+      const existing = getByIdStmt.get(id) as Row | undefined;
+      if (!existing) return null;
+      updateAccountEnabledStmt.run(enabled ? 1 : 0, id);
+      return this.getAccount(id);
     },
 
     touchUsed(id) {

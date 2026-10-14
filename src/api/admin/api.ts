@@ -111,6 +111,7 @@ export function handleAdminApi({
         onboardedAt,
         tokenExpiresAt,
         hasRefreshToken: store.hasRefreshToken(a.id),
+        enabled: a.enabled,
       };
     });
     return c.json(accounts);

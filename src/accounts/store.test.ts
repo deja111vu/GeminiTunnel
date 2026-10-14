@@ -162,6 +162,47 @@ describe('store CRUD', () => {
   });
 });
 
+describe('account enabled', () => {
+  let tmp: string;
+  let store: ReturnType<typeof createStore>;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'gt-'));
+    store = createStore(tmp, KEY);
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('defaults enabled to true on new accounts', () => {
+    const acc = store.addAccount({ email: 'a@example.com', refreshToken: 'rt' });
+    expect(acc.enabled).toBe(true);
+  });
+
+  it('setAccountEnabled updates the row and reflects in getAccount/listAccounts', () => {
+    const acc = store.addAccount({ email: 'a@example.com', refreshToken: 'rt' });
+    const updated = store.setAccountEnabled(acc.id, false);
+    expect(updated).not.toBeNull();
+    expect(updated!.enabled).toBe(false);
+    expect(store.getAccount(acc.id)!.enabled).toBe(false);
+    const list = store.listAccounts();
+    expect(list.find((a) => a.id === acc.id)!.enabled).toBe(false);
+  });
+
+  it('setAccountEnabled(true) re-enables a previously disabled account', () => {
+    const acc = store.addAccount({ email: 'a@example.com', refreshToken: 'rt' });
+    store.setAccountEnabled(acc.id, false);
+    const re = store.setAccountEnabled(acc.id, true);
+    expect(re!.enabled).toBe(true);
+    expect(store.getAccount(acc.id)!.enabled).toBe(true);
+  });
+
+  it('setAccountEnabled returns null for a missing id (no throw)', () => {
+    expect(store.setAccountEnabled(999, false)).toBeNull();
+  });
+});
+
 describe('api_keys CRUD', () => {
   let tmp: string;
   let store: ReturnType<typeof createStore>;

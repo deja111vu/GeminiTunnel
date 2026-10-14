@@ -83,6 +83,21 @@ describe('handleAdminApi', () => {
     expect(body[0]!.hasRefreshToken).toBe(true);
   });
 
+  it('masks the response and includes the enabled flag', async () => {
+    store.addAccount({ email: 'a@example.com', refreshToken: 'rt' });
+    const res = await makeApp(store).request('/admin/api/accounts', {
+      method: 'GET',
+      headers: adminHeaders(),
+    });
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveProperty('enabled', true);
+    // Encryption fields never leak
+    expect(rows[0]).not.toHaveProperty('refresh_token_encrypted');
+    expect(rows[0]).not.toHaveProperty('access_token_encrypted');
+  });
+
   it('DELETE /admin/api/accounts/:id removes the account', async () => {
     const a = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
     const res = await makeApp(store).request(`/admin/api/accounts/${a.id}`, {
