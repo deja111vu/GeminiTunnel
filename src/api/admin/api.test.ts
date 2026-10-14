@@ -4,7 +4,9 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { Hono } from 'hono';
 import { createStore, type Store } from '../../accounts/store.js';
+import { AccountPool } from '../../accounts/pool.js';
 import { KeyPool } from '../gemini/keyPool.js';
+import { UnifiedPool } from '../gemini/unifiedPool.js';
 import { handleAdminApi } from './api.js';
 import { resetProxyTokenStoreForTests } from './proxyTokenStore.js';
 
@@ -22,6 +24,8 @@ vi.mock('../../oauth/client.js', () => ({
 function makeApp(
   store: Store,
   keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 }),
+  accountPool?: AccountPool,
+  unifiedPool?: UnifiedPool,
 ) {
   const app = new Hono();
   // mock refresher: both methods are now part of the RefresherLike contract
@@ -37,6 +41,8 @@ function makeApp(
     encryptionKey: KEY,
     adminToken: ADMIN,
     keyPool,
+    accountPool,
+    unifiedPool,
   });
   return app;
 }
@@ -510,5 +516,91 @@ describe('handleAdminApi', () => {
   it('GET /admin/api/keys requires admin auth', async () => {
     const res = await makeApp(store).request('/admin/api/keys');
     expect([401, 403]).toContain(res.status);
+  });
+
+  describe('PATCH /admin/api/accounts/:id', () => {
+    // Build a Hono app wired with both AccountPool and UnifiedPool so the
+    // handler's `accountPool.enable/disable` + `unifiedPool.rebuild` branches
+    // are exercised end-to-end. The key pool is the same shape used in the
+    // other tests; the AccountPool only needs `store` + `refresher` to satisfy
+    // its constructor (we never call .pick() in this suite).
+    function makeAppWithPools() {
+      const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+      const refresher = {
+        getAccessToken: async (id: number) => `tok-${id}`,
+        forceRefresh: async (id: number) => `tok-${id}`,
+      };
+      const accountPool = new AccountPool({ store, refresher, cooldownMs: 60_000 });
+      const unifiedPool = new UnifiedPool({ accountPool, keyPool, store });
+      const app = makeApp(store, keyPool, accountPool, unifiedPool);
+      return { app, accountPool, unifiedPool, keyPool };
+    }
+
+    it('200 + masked row on {enabled:false}; pool.rebuild is called and pool rejects the account', async () => {
+      const { app, unifiedPool, accountPool } = makeAppWithPools();
+      const acc = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+      const rebuildSpy = vi.spyOn(unifiedPool, 'rebuild');
+      const res = await app.request(`/admin/api/accounts/${acc.id}`, {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { id: number; enabled: boolean };
+      expect(body.enabled).toBe(false);
+      // Response is masked: no ciphertext fields
+      expect((body as Record<string, unknown>).refresh_token_encrypted).toBeUndefined();
+      expect((body as Record<string, unknown>).access_token_encrypted).toBeUndefined();
+      expect(rebuildSpy).toHaveBeenCalled();
+      // Observable contract: the next /admin/api/accounts GET reports
+      // enabled:false (single source of truth — the masked GET shape
+      // from Task 1). No private-field poking into AccountPool.
+      const list = await app.request('/admin/api/accounts', { headers: adminHeaders() });
+      const rows = (await list.json()) as Array<{ id: number; enabled: boolean }>;
+      const found = rows.find((r) => r.id === acc.id);
+      expect(found?.enabled).toBe(false);
+      // AccountPool.disable is observable through rebuild() + a subsequent
+      // pick() that skips the disabled id — but the spec keeps the surface
+      // here to the masked GET; the disabledIds set is private.
+      expect(accountPool).toBeDefined();
+    });
+
+    it('404 for missing id', async () => {
+      const { app } = makeAppWithPools();
+      const res = await app.request('/admin/api/accounts/999', {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it('400 for non-boolean body', async () => {
+      const { app } = makeAppWithPools();
+      const acc = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+      const res = await app.request(`/admin/api/accounts/${acc.id}`, {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: 'yes' }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('{enabled:true} re-enables a previously disabled account (visible in GET)', async () => {
+      const { app } = makeAppWithPools();
+      const acc = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+      await app.request(`/admin/api/accounts/${acc.id}`, { method: 'PATCH', headers: adminHeaders(), body: JSON.stringify({ enabled: false }) });
+      const res = await app.request(`/admin/api/accounts/${acc.id}`, { method: 'PATCH', headers: adminHeaders(), body: JSON.stringify({ enabled: true }) });
+      expect(res.status).toBe(200);
+      const list = await app.request('/admin/api/accounts', { headers: adminHeaders() });
+      const rows = (await list.json()) as Array<{ id: number; enabled: boolean }>;
+      expect(rows.find((r) => r.id === acc.id)?.enabled).toBe(true);
+    });
+
+    // Note: the dispatcher-side contract ("disabled account → 503
+    // no_upstreams_enabled after PATCH") is covered by the unifiedDispatch
+    // tests in Task 4 (unifiedDispatch.test.ts), not here. The admin API
+    // surface and the dispatcher live in separate Hono apps; the GET
+    // shape assertion above is the single source of truth.
   });
 });

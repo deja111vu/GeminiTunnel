@@ -10,9 +10,10 @@ import { addPending } from '../../oauth/state.js';
 import { finalizeLogin, FinalizeError } from '../../oauth/finalize.js';
 import { requireAdmin, setAdminCookie, clearAdminCookie } from './auth.js';
 import { ApiKeyConflictError, type Store } from '../../accounts/store.js';
-import type { RefresherLike } from '../../accounts/pool.js';
+import type { RefresherLike, AccountPool } from '../../accounts/pool.js';
 import { KEY_RE } from '../gemini/keyConfig.js';
 import type { KeyPool } from '../gemini/keyPool.js';
+import type { UnifiedPool } from '../gemini/unifiedPool.js';
 import { getProxyTokenStore, type ProxyTokenStore } from './proxyTokenStore.js';
 
 const StartBody = z.object({ accountLabel: z.string().min(1).max(64).default('default') });
@@ -60,6 +61,11 @@ export interface AdminApiDeps {
   // middleware reads on every request. Wiring at boot lives in
   // `src/index.ts` (Step 8.6).
   proxyTokenStore?: ProxyTokenStore;
+  // New for the unified-pool toggle. Optional so this task compiles
+  // before Task 7 constructs the pools. Task 7 makes them required
+  // again (drops the `?`) when wiring createApp.
+  accountPool?: AccountPool;
+  unifiedPool?: UnifiedPool;
 }
 
 export function handleAdminApi({
@@ -70,6 +76,8 @@ export function handleAdminApi({
   adminToken,
   keyPool,
   proxyTokenStore = getProxyTokenStore(),
+  accountPool,
+  unifiedPool,
 }: AdminApiDeps): void {
   // Login + logout are NOT under requireAdmin — they're how the user
   // gets a session in the first place. We register them before the
@@ -124,6 +132,45 @@ export function handleAdminApi({
     if (!acc) return c.json({ error: 'not_found' }, 404);
     store.removeAccount(id);
     return c.body(null, 204);
+  });
+
+  const AccountPatchBody = z.object({ enabled: z.boolean() });
+
+  app.patch('/admin/api/accounts/:id', async (c) => {
+    const id = parseRowId(c.req.param('id') ?? '');
+    if (id === null) return c.json({ error: 'invalid_id' }, 400);
+    const raw = await c.req.json().catch(() => null);
+    const parsed = AccountPatchBody.safeParse(raw);
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    // Precheck so 404 takes precedence over a body-error (matches
+    // PATCH /admin/api/keys/:id shape).
+    const existing = store.getAccount(id);
+    if (!existing) return c.json({ error: 'not_found' }, 404);
+    // Both pools are required to mutate the dispatcher view of the
+    // world; refuse if the wiring is incomplete (Task 7 always provides
+    // them; this guard lets Task 5 compile in isolation).
+    if (!accountPool || !unifiedPool) {
+      return c.json({ error: 'admin_api_not_fully_wired' }, 503);
+    }
+    const updated = store.setAccountEnabled(id, parsed.data.enabled);
+    if (!updated) return c.json({ error: 'not_found' }, 404);
+    if (parsed.data.enabled) accountPool.enable(id);
+    else accountPool.disable(id);
+    unifiedPool.rebuild();
+    // Masked shape: same as GET /admin/api/accounts.
+    return c.json({
+      id: updated.id,
+      email: updated.email,
+      status: updated.status,
+      tierId: updated.tierId,
+      tierName: updated.tierName,
+      cooldownUntil: updated.cooldownUntil,
+      lastUsedAt: updated.lastUsedAt,
+      onboardedAt: updated.onboardedAt,
+      tokenExpiresAt: updated.tokenExpiresAt,
+      hasRefreshToken: store.hasRefreshToken(updated.id),
+      enabled: updated.enabled,
+    });
   });
 
   app.post('/admin/api/accounts/:id/refresh', async (c) => {
