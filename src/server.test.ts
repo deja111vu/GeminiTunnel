@@ -1,7 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { createApp } from './server.js';
 import { KeyPool } from './api/gemini/keyPool.js';
 import { KeyClient } from './api/gemini/keyClient.js';
+import { AccountPool } from './accounts/pool.js';
+import { UnifiedPool } from './api/gemini/unifiedPool.js';
+import { CodeAssistClient } from './api/codeassist/client.js';
+import { createStore } from './accounts/store.js';
 import {
   getProxyTokenStore,
   resetProxyTokenStoreForTests,
@@ -186,33 +193,65 @@ describe('server', () => {
     expect(body.error).toBe('key_in_query_string_forbidden');
   });
 
-  it('empty KeyPool + valid x-goog-api-key + valid proxy Bearer -> 503 all_keys_unavailable', async () => {
-    // Invariant pinned by the dynamic-api-keys work: the pool is built
-    // even when it is empty (so the admin UI can fill it at runtime),
-    // and a key-path request against an empty pool surfaces as 503 —
-    // NOT as a silent fallthrough to the OAuth handler. The proxy
-    // token is required before this code path is reached.
+  it('empty KeyPool + valid x-goog-api-key + valid proxy Bearer -> dispatcher routes the keyed call (no silent fallthrough)', async () => {
+    // Spec: "AQ.Ab… (valid format) | irrelevant | proxy uses *that* key as
+    // a single shot, ignores pool". The dispatcher must NOT silently
+    // fall through to the OAuth handler just because the pool is empty;
+    // a client that explicitly named a key gets a single-shot keyed
+    // request. We mock keyClient.getJson to make the upstream call
+    // observable without a real Google round-trip.
     const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
-    const keyClient = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com' });
+    const keyClient = new KeyClient({ baseUrl: 'https://generativelanguage.googleapis.com', timeoutMs: 5_000 });
+    vi.spyOn(keyClient, 'getJson').mockResolvedValue({ choices: [{ message: { content: 'ok' } }] });
+    // The unified dispatcher (Task 7) requires the FULL dep set: an
+    // AccountPool (real, even if unused), a UnifiedPool wrapping it,
+    // an OAuth client, and a real Store. An empty store yields an
+    // empty UnifiedPool, so the dispatcher would normally have no
+    // revolver targets — but the x-goog-api-key header (single-shot
+    // contract) bypasses the revolver and goes straight to keyClient.
+    const encKey = 'a'.repeat(64);
+    const tmp = mkdtempSync(path.join(tmpdir(), 'gt-srv-'));
+    const store = createStore(tmp, encKey);
+    const accountPool = new AccountPool({
+      store,
+      refresher: {
+        getAccessToken: vi.fn(async (id: number) => `tok-${id}`),
+        forceRefresh: vi.fn(async (id: number) => `tok-${id}`),
+      },
+      cooldownMs: 60_000,
+    });
+    const unifiedPool = new UnifiedPool({ accountPool, keyPool, store });
+    const oauthClient = new CodeAssistClient();
+    const streamSpy = vi.spyOn(oauthClient, 'streamGenerateContent');
     const cfg = {
       geminiApiKeys: [],
       keyCooldownAfter429Ms: 60_000,
       keyBadTtlMs: 86_400_000,
       switchBudget: 1,
     } as unknown as Config;
-    const app = makeAppWithToken({ keyPool, keyClient, config: cfg });
+    const app = makeAppWithToken({
+      keyPool,
+      keyClient,
+      pool: accountPool,
+      unifiedPool,
+      oauthClient,
+      store,
+      config: cfg,
+    });
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'content-length': String(JSON.stringify({ model: 'gemini-2.5-pro', messages: [] }).length),
-        'x-goog-api-key': 'AQ.Ab' + 'a'.repeat(44),
+        'x-goog-api-key': K1,
         authorization: `Bearer ${PROXY_TOKEN}`,
       },
       body: JSON.stringify({ model: 'gemini-2.5-pro', messages: [] }),
     });
-    expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe('all_keys_unavailable');
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+    expect(res.status).toBe(200);
+    expect(streamSpy).not.toHaveBeenCalled();
   });
 
   // Closed-always: with no token set anywhere, every /v1/* request

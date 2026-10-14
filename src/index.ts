@@ -5,7 +5,6 @@ import { createStore } from './accounts/store.js';
 import { TokenRefresher } from './accounts/refresher.js';
 import { AccountPool } from './accounts/pool.js';
 import { CodeAssistClient } from './api/codeassist/client.js';
-import { handleChatCompletion } from './api/openai/chat.js';
 import { handleListModels } from './api/openai/models.js';
 import { handleAdminApi, serveAdminUi } from './api/admin/api.js';
 import {
@@ -15,6 +14,7 @@ import {
 import { QuotaPoller } from './quota/poller.js';
 import { KeyPool } from './api/gemini/keyPool.js';
 import { KeyClient } from './api/gemini/keyClient.js';
+import { UnifiedPool } from './api/gemini/unifiedPool.js';
 
 async function main(): Promise<void> {
   const store = createStore(config.dataDir, config.accountsEncryptionKey);
@@ -51,9 +51,23 @@ async function main(): Promise<void> {
     'proxy token seed',
   );
 
-  const app = createApp({ pool, store, keyPool, keyClient, config, proxyTokenStore });
+  // Build the unified pool. Boot order: enabled OAuth accounts first
+  // (by id asc), then enabled API keys (by id asc). The pool re-reads
+  // from the store on every rebuild() — called by the admin PATCH
+  // handlers.
+  const unifiedPool = new UnifiedPool({ accountPool: pool, keyPool, store });
 
-  handleChatCompletion({ app, pool, client, store, config });
+  const app = createApp({
+    pool,
+    store,
+    keyPool,
+    keyClient,
+    config,
+    proxyTokenStore,
+    unifiedPool,
+    oauthClient: client,
+  });
+
   handleListModels({ app });
   serveAdminUi(app);
   handleAdminApi({
@@ -64,6 +78,8 @@ async function main(): Promise<void> {
     adminToken: config.adminToken,
     keyPool,
     proxyTokenStore,
+    accountPool: pool,
+    unifiedPool,
   });
 
   const poller = new QuotaPoller({

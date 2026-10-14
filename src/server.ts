@@ -3,9 +3,11 @@ import { logger } from './logger.js';
 import { config } from './config.js';
 import { timingSafeEqual } from 'node:crypto';
 import { findApiKeyInQuery } from './api/gemini/keyConfig.js';
-import { keyOrOAuth } from './api/gemini/middleware.js';
+import { unifiedDispatch } from './api/gemini/middleware.js';
 import type { KeyClient } from './api/gemini/keyClient.js';
 import type { KeyPool } from './api/gemini/keyPool.js';
+import type { UnifiedPool } from './api/gemini/unifiedPool.js';
+import type { CodeAssistClient } from './api/codeassist/client.js';
 import type { AccountPool } from './accounts/pool.js';
 import type { Store } from './accounts/store.js';
 import type { Config } from './config.js';
@@ -112,7 +114,7 @@ export interface CreateAppDeps {
   store?: Store;
   // The API-key path. When `keyPool` is provided, the middleware is
   // registered and `/health` exposes the keyPool summary. When both
-  // are present, the keyOrOAuth dispatcher sits between clientAuth
+  // are present, the unifiedDispatch dispatcher sits between clientAuth
   // and the OAuth handler.
   keyPool?: KeyPool;
   keyClient?: KeyClient;
@@ -123,6 +125,10 @@ export interface CreateAppDeps {
   // The mirror is seeded at boot by the caller (see
   // `seedProxyTokenStore` in src/api/admin/proxyTokenStore.ts).
   proxyTokenStore?: ProxyTokenStore;
+  // New for the unified dispatcher (Task 7). Required when
+  // keyPool + keyClient are wired; ignored otherwise.
+  unifiedPool?: UnifiedPool;
+  oauthClient?: CodeAssistClient;
   // Optional override for the config (used by tests); defaults to the
   // module-level singleton.
   config?: Config;
@@ -155,20 +161,20 @@ export function createApp(deps: CreateAppDeps = {}): Hono {
   // rejection runs before any handler that might log the raw URL.
   app.use('/v1/*', rejectKeyInQuery());
 
-  // API-key path dispatcher. Mounted whenever keyPool+keyClient are
-  // present. `enabled` is hardcoded true: the pool is always built
-  // now (see the dynamic-api-keys spec), so the key path is always
-  // live and an empty pool surfaces as 503 all_keys_unavailable.
-  // That replaces the old 400 key_path_disabled for key-path clients
-  // on deployments with no keys. Requests WITHOUT x-goog-api-key
-  // still fall through to the OAuth handler, unchanged.
-  if (deps.keyPool && deps.keyClient) {
+  // Unified dispatcher — replaces keyOrOAuth. Requires both pools
+  // (UnifiedPool needs the keyPool for its apikey branch AND the
+  // accountPool for oauth eligibility/token refresh). In OAuth-only
+  // deployments the call site passes an empty KeyPool.
+  if (deps.keyPool && deps.keyClient && deps.pool && deps.unifiedPool && deps.oauthClient && deps.store) {
     app.use(
       '/v1/chat/completions',
-      keyOrOAuth({
-        enabled: true,
-        pool: deps.keyPool,
-        client: deps.keyClient,
+      unifiedDispatch({
+        pool: deps.unifiedPool,
+        accountPool: deps.pool,
+        keyPool: deps.keyPool,
+        keyClient: deps.keyClient,
+        oauthClient: deps.oauthClient,
+        store: deps.store,
         config: cfg,
       }),
     );
