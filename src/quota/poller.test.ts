@@ -160,4 +160,19 @@ describe('QuotaPoller', () => {
     const poller = new QuotaPoller({ store, refresher: fakeRefresher, client: client as never, intervalMs: 999_999 });
     expect(() => poller.stop()).not.toThrow();
   });
+
+  it('does not poll disabled accounts (no quota_snapshots rows)', async () => {
+    const a = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+    store.setAccountEnabled(a.id, false);
+    client.loadCodeAssist.mockResolvedValue({ cloudaicompanionProject: 'proj-1' });
+    client.retrieveUserQuota.mockResolvedValue({
+      // Non-empty so a poll WOULD write a snapshot — without the enabled
+      // filter, this row would exist and the assertion would fail.
+      buckets: [{ modelId: 'gemini-2.5-pro', remainingAmount: 80, totalAmount: 100 }],
+    });
+    const poller = new QuotaPoller({ store, refresher: fakeRefresher, client: client as never, intervalMs: 999_999 });
+    await poller.runOnce();
+    const rows = store.db.prepare('SELECT * FROM account_quota_snapshots').all();
+    expect(rows.length).toBe(0);
+  });
 });

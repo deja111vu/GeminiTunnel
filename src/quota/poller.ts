@@ -73,7 +73,7 @@ export class QuotaPoller {
   }
 
   async runOnce(): Promise<void> {
-    const accounts = this.store.listAccounts().filter((a) => a.status === 'active');
+    const accounts = this.store.listAccounts().filter((a) => a.status === 'active' && a.enabled);
     // Run with bounded concurrency so one slow account does not block
     // the whole batch (sequential O(N) was the previous shape).
     await runWithConcurrency(accounts, POLL_CONCURRENCY, (acc) => this.pollOne(acc));
