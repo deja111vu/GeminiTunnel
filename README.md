@@ -287,6 +287,18 @@ CLIENT_API_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   Старый токен перестаёт работать сразу после успешной
   записи в mirror.
 
+## 🖥️ Admin UI
+
+### Disabling an OAuth account
+
+In the admin UI's **Accounts** tab, each row has an **Enable** /
+**Disable** button next to the **refresh** and **remove** actions.
+Disabling an account removes it from the unified upstream pool — the
+revolver will skip it on every request, and the quota poller stops
+writing `account_quota_snapshots` rows for it. The header override
+`x-goog-api-key: <key>` is unaffected; disabling is for the revolver
+only.
+
 ## 🏗 Архитектура
 
 ```
