@@ -109,4 +109,24 @@ describe('UnifiedPool', () => {
     u.rebuild();
     expect(u.size()).toBe(3);
   });
+
+  it('falls through to apikey when oauth item throws in AccountPool.pick', async () => {
+    // Regression: with items = [oauth, apikey] and the oauth item's
+    // accountPool.pick() throwing, pick() used to re-check the oauth
+    // item a second time (cursor was advanced during the first
+    // iteration, shifting the (cursor+i) read) and throw
+    // no_upstreams_enabled even though the apikey was available.
+    const a = makeAccount('a@e.com');
+    // Disable the account at the AccountPool level so its pick() throws
+    // (eligible.length === 0). The store still has it enabled, so
+    // UnifiedPool puts it in the boot list.
+    accountPool.disable(a.id);
+    store.addApiKey('k1', K1);
+    keyPool.addKey(K1);
+    const u = new UnifiedPool({ accountPool, keyPool, store });
+    expect(u.size()).toBe(2);
+    const up = await u.pick();
+    expect(up.kind).toBe('apikey');
+    if (up.kind === 'apikey') expect(up.key).toBe(K1);
+  });
 });

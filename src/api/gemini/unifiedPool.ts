@@ -105,8 +105,13 @@ export class UnifiedPool {
     // failure. The for-loop bound is the count of items (not
     // switchBudget) — the dispatcher enforces the per-request
     // budget. Here we just guarantee one full pass.
+    // Pin the start so a per-iteration cursor advance can't
+    // re-pick the same item: with the naive (cursor+i) read,
+    // advancing cursor on the FIRST iteration shifts the second
+    // iteration by +1, skipping item N+1 and re-checking item N.
+    const start = this.cursor;
     for (let i = 0; i < this.items.length; i++) {
-      const idx = (this.cursor + i) % this.items.length;
+      const idx = (start + i) % this.items.length;
       const item = this.items[idx];
       this.cursor = (idx + 1) % this.items.length;
       if (item.kind === 'oauth') {
