@@ -41,5 +41,14 @@ describe('serveAdminUi', () => {
     expect(html).toContain('id="panel-proxy"');
     expect(html).toContain('/admin/api/proxy-token');
   });
+
+  it('serves the accounts enabled toggle markup', async () => {
+    const app = new Hono();
+    serveAdminUi(app);
+    const res = await app.request('/admin');
+    const html = await res.text();
+    expect(html).toContain('data-act="toggle-enabled"');
+    expect(html).toMatch(/<th[^>]*>\s*enabled\s*<\/th>/i);
+  });
 });
 

@@ -214,14 +214,16 @@ async function loadAccounts() {
         <td>${escapeHtml(a.tierName || a.tierId || '—')}</td>
         <td>${a.cooldownUntil ? 'until ' + fmtTime(a.cooldownUntil) : '—'}</td>
         <td>${fmtTime(a.lastUsedAt)}</td>
+        <td><span class="pill ${a.enabled ? 'active' : 'disabled'}">${a.enabled ? 'on' : 'off'}</span></td>
         <td>
+          <button class="act" data-act="toggle-enabled" data-id="${a.id}" data-enabled="${a.enabled}">${a.enabled ? 'Disable' : 'Enable'}</button>
           <button class="act" data-act="refresh" data-id="${a.id}">refresh</button>
           <button class="act danger" data-act="remove" data-id="${a.id}">remove</button>
         </td>
       </tr>
     `).join('');
     $('#accounts-table').innerHTML = `<table>
-      <thead><tr><th>id</th><th>email</th><th>status</th><th>tier</th><th>cooldown</th><th>last used</th><th></th></tr></thead>
+      <thead><tr><th>id</th><th>email</th><th>status</th><th>tier</th><th>cooldown</th><th>last used</th><th>enabled</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
     // Quota selector
@@ -230,11 +232,11 @@ async function loadAccounts() {
       .join('');
     // Wire actions
     $('#accounts-table').querySelectorAll('button[data-act]').forEach((b) => {
-      b.addEventListener('click', () => handleAccountAction(b.dataset.act, b.dataset.id));
+      b.addEventListener('click', () => handleAccountAction(b.dataset.act, b.dataset.id, b.dataset.enabled));
     });
   } catch (e) { toast(e.message, true); }
 }
-async function handleAccountAction(act, id) {
+async function handleAccountAction(act, id, enabled) {
   try {
     if (act === 'refresh') {
       await api('/admin/api/accounts/' + id + '/refresh', { method: 'POST' });
@@ -243,6 +245,10 @@ async function handleAccountAction(act, id) {
       if (!confirm('Remove account #' + id + '?')) return;
       await api('/admin/api/accounts/' + id, { method: 'DELETE' });
       toast('removed');
+    } else if (act === 'toggle-enabled') {
+      const next = String(enabled) !== 'true';
+      await api('/admin/api/accounts/' + id, { method: 'PATCH', body: JSON.stringify({ enabled: next }) });
+      toast(next ? 'enabled' : 'disabled');
     }
     loadAccounts();
   } catch (e) { toast(e.message, true); }
