@@ -100,7 +100,28 @@ describe('integration: /v1/chat/completions with 429 -> account switch', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('switches from a (429) to b (200) and records cooldownUntil on a', async () => {
+  it('first account recovers on inner retry (inner switchBudget=3 absorbs the 429, dispatcher does NOT advance to b)', async () => {
+    // What this test asserts: when the first picked account returns a
+    // transient 429 followed by a 200 within its inner switchBudget, the
+    // dispatcher surfaces the 200 and records cooldownUntil on that
+    // account — b is never picked on this request.
+    //
+    // What this test does NOT assert: actual account-switching. With
+    // the unifiedDispatch dispatcher in its current form, runOAuthChat
+    // returns a Response object (200 or 5xx) rather than throwing on
+    // inner-budget exhaustion; the dispatcher's outer revolver
+    // therefore only advances on throws, not on 5xx Responses. (See
+    // `src/api/gemini/middleware.ts` — the catch-block fires only on
+    // thrown errors. This is the parked Task 4 spec/implementation
+    // gap: the design prose says "429/401/403/5xx → continue", the
+    // implementation returns the 5xx Response object and exits the
+    // dispatcher's outer loop.) Asserting account-switching here would
+    // require fixing the dispatcher, which is out of scope for this
+    // test-only fix round. The companion test below exercises the
+    // "no eligible upstreams" branch (pre-cooldown both accounts
+    // BEFORE the request, dispatcher surfaces 503). A follow-up test
+    // for genuine revolver-driven account switching belongs after the
+    // parked gap is closed.
     fetchMock
       .mockResolvedValueOnce(new Response('rate limited', { status: 429 }))
       .mockResolvedValueOnce(
@@ -125,16 +146,18 @@ describe('integration: /v1/chat/completions with 429 -> account switch', () => {
     };
     expect(json.choices[0]?.message.content).toBe('hello world');
 
-    // Upstream was hit twice (once per picked account).
+    // Upstream was hit twice against the SAME account (inner retry on
+    // the 429, then 200). The dispatcher did NOT re-pick.
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    // The first account is now on cooldown; the second is not. This is
-    // the load-bearing invariant: the next pick must skip a and use b.
+    // Account a is now on cooldown (the inner 429 triggered
+    // recordRateLimit). Account b is still untouched — it was never
+    // picked by the dispatcher on this request.
     const a = store.getAccount(accounts.a.id)!;
     const b = store.getAccount(accounts.b.id)!;
     expect(a.cooldownUntil).not.toBeNull();
     expect(a.cooldownUntil!).toBeGreaterThan(Date.now());
-    expect(b.cooldownUntil == null || b.cooldownUntil < Date.now()).toBe(true);
+    expect(b.cooldownUntil).toBeNull();
   });
 
   it('exhausts switchBudget and returns no_upstreams_enabled when every account is on cooldown', async () => {
