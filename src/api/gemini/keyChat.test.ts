@@ -1,12 +1,18 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { Hono } from 'hono';
-import { handleApiKeyChat } from './keyChat.js';
+import { handleApiKeyChat, runKeyChat } from './keyChat.js';
 import { KeyPool } from './keyPool.js';
 import { KeyClient } from './keyClient.js';
+import { HttpError } from '../codeassist/client.js';
+import { createStore, type Store } from '../../accounts/store.js';
 
 const K1 = 'AQ.Ab' + 'a'.repeat(44);
 const K2 = 'AQ.Ab' + 'b'.repeat(44);
 const K3 = 'AQ.Ab' + 'c'.repeat(44);
+const KEY = 'a'.repeat(64);
 
 function makeApp(pool: KeyPool, fetchImpl: typeof fetch, switchBudget = 2) {
   const app = new Hono();
@@ -336,5 +342,46 @@ describe('handleApiKeyChat', () => {
     expect(abortObserved).toBe(true);
     // Best-effort: full chain.
     expect(upstreamCancelled).toBe(true);
+  });
+});
+
+describe('runKeyChat pinnedKey', () => {
+  // Stand up a fresh pool with one known key, then send a request
+  // with a pinnedKey that is NOT in the pool. The handler must
+  // call the upstream with the pinned key, NOT touch cooldown
+  // tracking (because the key is unknown to the pool), and if
+  // upstream returns 5xx the error must be returned to the client
+  // (no fallback to other keys, no switchBudget consumption).
+  let tmp: string;
+  let store: Store;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'gt-pk-'));
+    store = createStore(tmp, KEY);
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('uses the pinned key and returns 5xx directly to the client (no revolver fallback)', async () => {
+    const knownKey = 'AQ.Ab' + 'k'.repeat(44);
+    const pinnedKey = 'AQ.Ab' + 'p'.repeat(44); // not in pool
+    const pool = new KeyPool({ keys: [knownKey], cooldownMs: 60_000, badTtlMs: 60_000, jitterMs: 0 });
+    const client = new KeyClient({ timeoutMs: 5_000 });
+    // Stub the upstream to 500
+    vi.spyOn(client, 'getJson').mockRejectedValue(new HttpError(500, 'upstream 500'));
+    const app = new Hono();
+    app.post('/v1/chat/completions', (c) =>
+      runKeyChat(c, { pool, client, config: { switchBudget: 3, requestTimeoutMs: 5_000, keyBadTtlMs: 86_400_000 }, pinnedKey }),
+    );
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gemini-3.1-flash-lite', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    expect(res.status).toBe(500);
+    // Pinned key was used exactly once (no switchBudget retries)
+    expect((client.getJson as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
   });
 });

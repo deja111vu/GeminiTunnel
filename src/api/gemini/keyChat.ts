@@ -53,6 +53,14 @@ export interface KeyChatDeps {
   pool: KeyPool;
   client: KeyClient;
   config: Pick<Config, 'switchBudget' | 'requestTimeoutMs' | 'keyBadTtlMs'>;
+  // Optional override: when set, the for-loop bypasses pool.pick(model)
+  // and uses this key directly. The pool's cooldown/bad tracking still
+  // applies to the key (so a pinned-in-pool key that 429s gets marked).
+  // A pinned key NOT in the pool silently bypasses tracking (current
+  // KeyPool behavior — `if (!this.known(key)) return;` guard).
+  // Single-shot: does NOT consume switchBudget; if the request fails,
+  // the error is returned to the client immediately.
+  pinnedKey?: string;
 }
 
 function classifyKeyError(err: HttpError, key: string, model: string, pool: KeyPool): 'retry' | 'fatal' {
@@ -76,8 +84,9 @@ function retryAfterSeconds(ms: number | null, fallbackMs: number): number {
 }
 
 // Pure handler. Used by both handleApiKeyChat (route registration) and
-// keyOrOAuth middleware (direct invocation — avoids Request body double-read).
-export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDeps): Promise<Response> {
+// unifiedDispatch middleware (direct invocation — avoids Request body
+// double-read).
+export async function runKeyChat(c: Context, { pool, client, config, pinnedKey }: KeyChatDeps): Promise<Response> {
   const raw = await c.req.json().catch(() => null);
   const parsed = ChatBody.safeParse(raw);
   if (!parsed.success) {
@@ -86,16 +95,21 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
   const body = parsed.data;
   const model = body.model;
 
+  // pinnedKey = single-shot override: one attempt, raw status on failure.
+  // The revolver path (no pinnedKey) gets switchBudget attempts and the
+  // budget-exhausted fallback below.
+  const budget = pinnedKey ? 1 : config.switchBudget;
   let lastFatalStatus: number | null = null;
-  for (let attempt = 0; attempt < config.switchBudget; attempt++) {
+  for (let attempt = 0; attempt < budget; attempt++) {
     let picked: { key: string };
     try {
-      picked = pool.pick(model);
+      picked = pinnedKey ? { key: pinnedKey } : pool.pick(model);
     } catch {
       // NoKeyAvailableError: pool knows whether it's all_bad or all_cooldown.
       // For Retry-After, prefer the actual time-to-expiry of whichever
       // class is blocking. Fall back to 60s — not keyBadTtlMs (24h) — when
       // the pool has no signal; an empty pool is not a 24h outage.
+      // Only relevant on the revolver path — pinnedKey bypasses pool.pick.
       const badMs = pool.minBadExpiry();
       const coolMs = pool.minCooldownExpiry(model);
       const retryMs = badMs ?? coolMs;
@@ -117,6 +131,18 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
         try {
           first = await it.next();
         } catch (err) {
+          if (pinnedKey) {
+            // Single-shot: return the raw upstream status, not a
+            // budget-exhausted 502. The client explicitly named the
+            // key; they want to see the upstream's verdict.
+            if (err instanceof HttpError) {
+              return c.json({ error: 'upstream_error', status: err.status }, err.status as Parameters<typeof c.json>[1]);
+            }
+            if (err instanceof UpstreamMisconfiguredError) {
+              return c.json({ error: 'upstream_misconfigured' }, 502);
+            }
+            return c.json({ error: 'upstream_error' }, 502);
+          }
           if (err instanceof HttpError) {
             const action = classifyKeyError(err, picked.key, model, pool);
             if (action === 'fatal') { lastFatalStatus = err.status; break; }
@@ -131,6 +157,7 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
           continue;
         }
         if (first.done) {
+          if (pinnedKey) return c.json({ error: 'upstream_misconfigured' }, 502);
           lastFatalStatus = 502;
           break;
         }
@@ -198,6 +225,15 @@ export async function runKeyChat(c: Context, { pool, client, config }: KeyChatDe
       pool.clearCooldown(picked.key, model);
       return c.json(json, 200);
     } catch (err) {
+      if (pinnedKey) {
+        // Single-shot: return the raw upstream status, not a
+        // budget-exhausted 502. The client explicitly named the
+        // key; they want to see the upstream's verdict.
+        if (err instanceof HttpError) {
+          return c.json({ error: 'upstream_error', status: err.status }, err.status as Parameters<typeof c.json>[1]);
+        }
+        return c.json({ error: 'upstream_error' }, 502);
+      }
       if (err instanceof HttpError) {
         const action = classifyKeyError(err, picked.key, model, pool);
         if (action === 'fatal') { lastFatalStatus = err.status; break; }
