@@ -59,6 +59,11 @@ ACCOUNTS_ENCRYPTION_KEY=${hex()}
 ADMIN_TOKEN=${hex()}
 
 # Публичный gemini-cli OAuth app (см. README → OAuth client).
+# intentionally public: это публичный OAuth client secret gemini-cli,
+# не service-account key и не refresh-token. Secret виден в исходниках
+# gemini-cli на GitHub (google-gemini/gemini-cli), его ротация не даст
+# оператору ничего — Google привязывает OAuth flow к конкретной паре
+# client_id/client_secret на уровне authorization server.
 GOOGLE_OAUTH_CLIENT_SECRET=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
 `;
 

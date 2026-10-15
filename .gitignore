@@ -13,3 +13,31 @@ review_diff.txt
 # facing documentation; keeps the public repo focused on the shipped
 # product. The shipped docs are README.md + CHANGELOG.md + LICENSE.
 docs/
+.superpowers/
+# Belt-and-suspenders for SQLite + secrets in case the data/ rule above
+# is ever removed or edited. Nothing under these patterns should ever
+# enter the public repo.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+# Private keys / certs / tokens
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+# Editor / OS scratch
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+# Worktrees / runtime scratch
+.worktrees/
+.claude/
+*.tmp
+*.bak

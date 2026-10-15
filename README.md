@@ -18,6 +18,14 @@ OpenAI-совместимый прокси для **Google Code Assist / Gemini 
 - 🔄 **Round-robin + LRU + circuit breaker** — несколько аккаунтов
   прозрачно для клиента. На 429 аккаунт уходит в cooldown на
   `COOLDOWN_AFTER_429_MS`, запрос летит на следующий.
+- 🎯 **Unified upstream pool** — OAuth-аккаунты и прямые
+  AQ.-ключи ([aistudio.google.com/apikey](https://aistudio.google.com/apikey))
+  живут в одном revolver, курсор идёт по очереди
+  (OAuth → … → apikey → …), любой upstream можно временно
+  отключить в Web UI без удаления. По умолчанию каждый запрос
+  идёт в pool; заголовок `x-goog-api-key: AQ.Ab…` форсирует
+  pinned-key путь (single-shot, без ротации). См.
+  [«Unified Upstream Pool»](#-unified-upstream-pool).
 - 📊 **Квоты и события** — фоновое опрашивание `/retrieveUserQuota`
   каждые 5 минут, история 429 на 7 дней, просмотр через Web UI.
 - 🖥️ **Web UI на `/admin`** — список аккаунтов, квоты, статус, ручной
@@ -37,12 +45,6 @@ OpenAI-совместимый прокси для **Google Code Assist / Gemini 
   digest-pinned base image, `npm audit` на build, CycloneDX SBOM.
 - 🪶 **Зависимости** — Node 22, `better-sqlite3`, `hono`, `pino`,
   `google-auth-library`. Никаких внешних сервисов.
-- 🔑 **Gemini API key path (опционально)** — параллельно с OAuth
-  можно подключить прямые AQ.-ключи из [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-  Клиент выбирает путь заголовком `x-goog-api-key: AQ.Ab…`; без
-  заголовка работает OAuth, как раньше. Round-robin по ключам,
-  per-model cooldown, отмена через AbortSignal. См.
-  [«Gemini API key path»](#-gemini-api-key-path-опционально).
 
 ## 🚀 Быстрый старт
 
@@ -63,7 +65,13 @@ nano .env
 Минимум нужно заменить:
 - `ACCOUNTS_ENCRYPTION_KEY` — 64 hex символа
 - `ADMIN_TOKEN` — 64 hex символа (для доступа к `/admin`)
-- `GOOGLE_OAUTH_CLIENT_SECRET` — публичный секрет gemini-cli
+- `GOOGLE_OAUTH_CLIENT_SECRET` — **публичный** OAuth client secret
+  gemini-cli. Значение из `scripts/gen-secrets.mjs` (то же, что в
+  исходниках [google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli))
+  работает «из коробки»; менять его не нужно. Ротация этого
+  секрета оператора ничего не даст — Google привязывает OAuth
+  flow к конкретной паре `client_id/client_secret` на уровне
+  authorization server, а не per-user.
 
 ### 3. Запустите
 
@@ -141,18 +149,27 @@ Settings → Models → OpenAI API Key:
 - Override OpenAI Base URL: `http://VPS_IP:8000/v1`
 - API Key: `<PROXY_TOKEN>`
 
-## 🔑 Gemini API key path (опционально)
+## 🎯 Unified Upstream Pool
 
-Параллельно с OAuth прокси умеет работать с прямыми ключами
-[Google Gemini API](https://aistudio.google.com/apikey). Полезно,
-когда не хочется логиниться через браузер или держать refresh-токены
-в БД: задал `GEMINI_API_KEYS=AQ.Ab…,AQ.Ab…` — и готово.
+OAuth-аккаунты и прямые AQ.-ключи
+([aistudio.google.com/apikey](https://aistudio.google.com/apikey))
+живут в **одном revolver** (`UnifiedPool`). Курсор идёт по
+кругу через все включённые upstream-ы (OAuth → … → apikey → …);
+первый подходящий получает запрос. Любой upstream можно
+временно отключить в Web UI — он остаётся в БД, но
+выпадает из ротации. Полезно, когда:
+
+- аккаунт словил rate-limit и ждёт cooldown — пусть лучше
+  работает ключ;
+- ключ временно отозван — пусть трафик идёт на OAuth;
+- вы тестируете конкретный upstream и не хотите, чтобы
+  трафик «убегал» в соседний.
 
 ### Что добавить в `.env`
 
 ```bash
-# CSV из AQ.-ключей. Пусто — key-путь выключен, прокси работает
-# только в OAuth-режиме (поведение 2.0.x).
+# CSV из AQ.-ключей. Пусто — apikey-путь выключен, прокси
+# работает только в OAuth-режиме.
 GEMINI_API_KEYS=AQ.Abxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,AQ.Abyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 
 # Cooldown per-key per-model после 429. По умолчанию 60с.
@@ -164,24 +181,38 @@ GEMINI_API_KEYS=AQ.Abxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,AQ.Abyyyyyyy
 
 ### Как подключить клиент
 
-Клиент выбирает путь заголовком. Без заголовка — OAuth, как раньше.
+По умолчанию (без заголовка) — револьвер: запрос идёт в
+pool, берётся первый доступный upstream. Если хотите
+**форсировать** конкретный ключ в обход ротации (single-shot,
+без попыток переключиться на следующий upstream при ошибке) —
+передайте его в `x-goog-api-key`:
 
 ```bash
-# Claude Code с key-путем: передаем AQ.-ключ в x-goog-api-key
+# Pinned-key путь: один конкретный ключ, без ротации.
 curl -X POST http://VPS_IP:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "x-goog-api-key: AQ.Abxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-В OpenAI-клиентах, которые не позволяют задать произвольный заголовок
-(Cline, Cursor, и т.п.), стандартный `api_key` всё равно уходит в
+В OpenAI-клиентах, которые не позволяют задать произвольный
+заголовок (Cline, Cursor, …), стандартный `api_key` уходит в
 `Authorization: Bearer …` — прокси этот вариант игнорирует и
-проваливается на OAuth. Для таких клиентов key-путь пока не
-поддержан.
+работает через revolver. Pinned-key путь для таких клиентов
+не поддержан.
 
 ### Как это работает внутри
 
+- **`UnifiedPool`** — единый курсор по `(oauth, oauth, …, apikey,
+  apikey, …)` в порядке `id ASC` (OAuth по `accounts.id`, ключи
+  по `api_keys.id`). На каждый запрос — одна полная пробежка
+  по pool; если OAuth-аккаунт выдаёт ошибку (cooldown, invalid
+  grant), курсор переходит к следующему элементу в той же
+  пробежке, не возвращая ошибку клиенту. Только когда pool
+  целиком исчерпан — `503 no_upstreams_enabled`.
+- **`AccountPool`** — round-robin + LRU + per-account cooldown
+  после 429. `enable/disable` синхронизированы с `UnifiedPool`
+  через `rebuild()` после каждого PATCH.
 - **`KeyPool`** — round-robin по ключам, монотонный seq-тай-брейк
   при равном LRU. Per-model cooldown после 429 (по умолчанию
   60 с, ключ не выбирается для этой модели, но может выбираться
@@ -194,11 +225,6 @@ curl -X POST http://VPS_IP:8000/v1/chat/completions \
   [OpenAI-compat spec](https://ai.google.dev/gemini-api/docs/openai).
   AbortSignal пробрасывается до upstream-ридера: клиентский
   disconnect вызывает `reader.cancel()` и не висит до конца стрима.
-- **`runKeyChat`** — `bodyCap → clientAuth → keyOrOAuth → route`.
-  First-chunk safety: первый SSE-чанк прочитывается до отправки
-  клиенту, поэтому upstream 4xx/5xx приходит как HTTP-статус, а не
-  как 200 OK + trailing error chunk. Cooldown снимается сразу после
-  первого успешного чанка, не дожидаясь конца стрима.
 - **`/health`** — при включённом key-пути возвращает агрегированную
   сводку:
 
@@ -216,14 +242,15 @@ curl -X POST http://VPS_IP:8000/v1/chat/completions \
 ### Безопасность
 
 - **AQ.-ключи в URL → 400**. Запрос с `?key=AQ.Ab…` всегда
-  отбивается (даже при `KEY_PATH_ENABLED=false`), чтобы ключи
-  не попадали в access-логи, browser history и referer.
+  отбивается, чтобы ключи не попадали в access-логи, browser
+  history и referer.
 - **AQ.-ключи в логах → redact**. `x-goog-api-key` (и все
   регистры) добавлены в pino redact paths. `Authorization` тоже.
 - **Один key-rotation цикл на запрос**. Если все ключи в cooldown
   или bad — 503 + `Retry-After`, без бесконечного перебора.
-- **Обратно совместимо с 2.0.x**. `GEMINI_API_KEYS` пуст → прокси
-  ведёт себя ровно как раньше. OAuth-клиенты не замечают изменений.
+- **Disable ≠ Delete**. Отключённый upstream остаётся в БД
+  (refresh-токены, квоты, история), но выпадает из ротации. Включить
+  обратно можно одной кнопкой в Web UI.
 
 ## 🔐 Proxy Access: токен для /v1
 
@@ -289,15 +316,32 @@ CLIENT_API_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 ## 🖥️ Admin UI
 
-### Disabling an OAuth account
+Web UI на `/admin` показывает всё, что нужно для эксплуатации
+прокси в одной странице. Авторизация — HttpOnly+Secure+SameSite=Strict
+cookie; Bearer-токен остался для curl и тестов.
 
-In the admin UI's **Accounts** tab, each row has an **Enable** /
-**Disable** button next to the **refresh** and **remove** actions.
-Disabling an account removes it from the unified upstream pool — the
-revolver will skip it on every request, and the quota poller stops
-writing `account_quota_snapshots` rows for it. The header override
-`x-goog-api-key: <key>` is unaffected; disabling is for the revolver
-only.
+### Вкладки
+
+- **Accounts** — список OAuth-аккаунтов. Кнопки `refresh`, `remove`,
+  `Enable/Disable` (см. ниже), квоты с историей.
+- **API Keys** — список AQ.-ключей. Аналогичные действия.
+- **Proxy Access** — Generate / Rotate / Remove единственного
+  proxy-токена для `/v1/*` (см. раздел «Proxy Access»).
+- **Quotas** — общая сводка и история 429.
+
+### Disabling an OAuth account / API key
+
+В обеих таблицах (Accounts и API Keys) у каждой строки есть кнопка
+**Enable / Disable** рядом с `refresh` / `remove`. Disable убирает
+upstream из `UnifiedPool`: револьвер пропускает его на каждом
+запросе, `QuotaPoller` перестаёт писать новые `account_quota_snapshots`.
+Refresh-токены и зашифрованные ключи **остаются в БД** — disable
+это не delete. Включить обратно — той же кнопкой.
+
+Pinned-key путь (`x-goog-api-key: …`) disable **не затрагивает**:
+если клиент явно передал ключ, прокси использует его в single-shot
+режиме независимо от состояния toggle. Disable относится только
+к револьверу.
 
 ## 🏗 Архитектура
 
@@ -306,35 +350,48 @@ only.
 │  Claude     │         │  gemini-tunnel  (VPS, port 8000)   │         │  Google Code Assist│
 │  Code /     │  HTTP   │                                    │  HTTPS  │                    │
 │  Cline /    │ ──────► │  ┌────────────┐    ┌────────────┐  │ ──────► │  cloudcode-pa.     │
-│  Cursor     │  /v1/*  │  │ Hono router│───►│AccountPool │  │  OAuth  │  googleapis.com    │
-│             │ ◄────── │  └────────────┘    │ (LRU/429)  │  │ ◄────── │                    │
-│             │   SSE   │       │            └────────────┘  │  stream │  /v1internal:      │
+│  Cursor     │  /v1/*  │  │ Hono router│───►│UnifiedPool │  │  OAuth  │  googleapis.com    │
+│             │ ◄────── │  └────────────┘    │ (revolver) │  │ ◄────── │                    │
+│             │   SSE   │       │            └─────┬──────┘  │  stream │  /v1internal:      │
 │             │         │       │                  │         │         │  streamGenerate-   │
-│             │         │       ▼                  ▼         │         │  Content           │
-│             │         │  ┌────────────┐    ┌────────────┐  │         │                    │
-│             │         │  │ SQLite     │    │TokenRefr.  │  │         │                    │
-│             │         │  │ (AES-GCM)  │    │(refresh +  │  │         │                    │
-│             │         │  │            │    │ cooldown)  │  │         │                    │
-│             │         │  └────────────┘    └────────────┘  │         │                    │
-│             │         │  ┌────────────┐    ┌────────────┐  │         └────────────────────┘
-│             │         │  │QuotaPoller │    │   /admin   │  │
-│             │         │  │ (5min)     │    │   Web UI   │  │
-│             │         │  └────────────┘    └────────────┘  │
+│             │         │       │            ┌─────┴──────┐  │         │  Content           │
+│             │         │       ▼            ▼             ▼  │         │                    │
+│             │         │  ┌────────────┐ ┌──────────┐ ┌──┐  │         └────────────────────┘
+│             │         │  │ SQLite     │ │AccountPool│ │K.│  │         ┌────────────────────┐
+│             │         │  │ (AES-GCM)  │ │(LRU/429/  │ │e.│  │  HTTPS  │  Gemini API        │
+│             │         │  │            │ │ cooldown) │ │y.│  │ ──────► │  (apikey path)     │
+│             │         │  └────────────┘ └──────────┘ │P.│  │  Bearer │  generativelanguage│
+│             │         │  ┌────────────┐ ┌──────────┐ │o.│  │ ◄────── │  .googleapis.com    │
+│             │         │  │QuotaPoller │ │TokenRefr.│ │o.│  │  stream │  /v1beta/openai/   │
+│             │         │  │ (5min)     │ │(refresh +│ │l.│  │         │  chat/completions  │
+│             │         │  │            │ │ cooldown)│ │  │
+│             │         │  └────────────┘ └──────────┘ └──┘
+│             │         │  ┌────────────┐
+│             │         │  │  /admin   │
+│             │         │  │  Web UI   │
+│             │         │  └────────────┘
 └─────────────┘         └────────────────────────────────────┘
 ```
 
 - **Hono router** — единственный HTTP entry point, валидирует zod-схемы.
+- **UnifiedPool** — единый револьвер по `oauth + apikey` upstream-ам.
+  Один курсор на pool, при ошибке OAuth-элемента переходит к
+  следующему в той же пробежке. `rebuild()` вызывается после
+  каждого PATCH (`enabled` / add / remove).
 - **AccountPool** — на каждый запрос выбирает активный аккаунт по LRU
   + in-memory tie-breaker, выдаёт действующий access-токен. На 429
   ставит аккаунт в cooldown (через SQLite) и переключается.
+- **KeyPool** — round-robin по AQ.-ключам, per-model cooldown после
+  429, per-key «bad» TTL после 401/403/404, startup jitter.
 - **TokenRefresher** — `google-auth-library` обновляет access-токен
   по `refresh_token` с 60-секундным leeway до истечения. Хранит
   refresh-токены только в зашифрованном виде.
 - **QuotaPoller** — раз в `QUOTA_POLL_INTERVAL_MS` опрашивает каждый
   активный аккаунт, пишет строки в `account_quota_snapshots` для UI.
+  Пропускает отключённые (`enabled=false`) аккаунты.
 - **SQLite (WAL)** — единственное постоянное хранилище. Refresh-токены
-  шифруются AES-256-GCM с `ACCOUNTS_ENCRYPTION_KEY` (12-байт IV,
-  формат `iv ‖ ciphertext ‖ tag`).
+  и AQ.-ключи шифруются AES-256-GCM с `ACCOUNTS_ENCRYPTION_KEY`
+  (12-байт IV, формат `iv ‖ ciphertext ‖ tag`).
 
 ## 🔐 Безопасность
 
