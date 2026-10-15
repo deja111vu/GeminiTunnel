@@ -131,6 +131,8 @@ export function handleAdminApi({
     const acc = store.getAccount(id);
     if (!acc) return c.json({ error: 'not_found' }, 404);
     store.removeAccount(id);
+    accountPool?.disable(id);
+    unifiedPool?.rebuild();
     return c.body(null, 204);
   });
 
@@ -257,6 +259,7 @@ export function handleAdminApi({
       // holding a key the DB never recorded.
       const row = store.addApiKey(parsed.data.label, parsed.data.key);
       keyPool.addKey(parsed.data.key);
+      unifiedPool?.rebuild();
       return c.json(row, 201);
     } catch (err) {
       if (err instanceof ApiKeyConflictError) {
@@ -275,6 +278,7 @@ export function handleAdminApi({
     if (!row) return c.json({ error: 'not_found' }, 404);
     store.removeApiKey(id);
     keyPool.removeKey(row.key);
+    unifiedPool?.rebuild();
     return c.body(null, 204);
   });
   app.delete('/admin/api/keys/', (c) => c.json({ error: 'invalid_id' }, 400));
@@ -290,6 +294,7 @@ export function handleAdminApi({
     const updated = store.setApiKeyEnabled(id, parsed.data.enabled);
     if (parsed.data.enabled) keyPool.addKey(row.key);
     else keyPool.removeKey(row.key);
+    unifiedPool?.rebuild();
     return c.json(updated);
   });
 

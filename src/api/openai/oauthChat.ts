@@ -1,5 +1,4 @@
 // oauthChat.ts — extracted from handleChatCompletion in chat.ts.
-// Spec: docs/superpowers/specs/2026-10-14-unified-upstream-pool-design.md
 //
 // Takes a pre-fetched OAuth token (UnifiedPool already awaits
 // AccountPool.pick()'s token refresh) and runs the upstream request

@@ -1,5 +1,4 @@
 // unifiedPool.ts — single revolver over OAuth accounts + API keys.
-// Spec: docs/superpowers/specs/2026-10-14-unified-upstream-pool-design.md
 //
 // Boot order (deterministic across restarts):
 //   1. all enabled OAuth accounts, by id ASC

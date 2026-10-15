@@ -603,4 +603,125 @@ describe('handleAdminApi', () => {
     // surface and the dispatcher live in separate Hono apps; the GET
     // shape assertion above is the single source of truth.
   });
+
+  // Regression: the keys POST/PATCH/DELETE handlers and the account
+  // DELETE handler must call unifiedPool.rebuild() so the revolver's
+  // in-memory snapshot stays in sync with the store. Without it, a
+  // key added in the UI is invisible to the dispatcher until restart.
+  describe('UnifiedPool rebuild on admin mutations', () => {
+    function makeAppWithPools() {
+      const keyPool = new KeyPool({ keys: [], cooldownMs: 60_000, badTtlMs: 86_400_000, jitterMs: 0 });
+      const refresher = {
+        getAccessToken: async (id: number) => `tok-${id}`,
+        forceRefresh: async (id: number) => `tok-${id}`,
+      };
+      const accountPool = new AccountPool({ store, refresher, cooldownMs: 60_000 });
+      const unifiedPool = new UnifiedPool({ accountPool, keyPool, store });
+      const app = makeApp(store, keyPool, accountPool, unifiedPool);
+      return { app, accountPool, unifiedPool, keyPool };
+    }
+    const K1 = 'AQ.Ab' + 'a'.repeat(44);
+    const K2 = 'AQ.Ab' + 'b'.repeat(44);
+
+    it('POST /admin/api/keys calls unifiedPool.rebuild() and the new key is pickable', async () => {
+      const { app, unifiedPool, keyPool } = makeAppWithPools();
+      const spy = vi.spyOn(unifiedPool, 'rebuild');
+      const res = await app.request('/admin/api/keys', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ label: 'k1', key: K1 }),
+      });
+      expect(res.status).toBe(201);
+      expect(spy).toHaveBeenCalled();
+      // Observable: unifiedPool.size reflects the new key, not the
+      // pre-rebuild snapshot.
+      expect(unifiedPool.size()).toBe(1);
+      expect(keyPool.pick().key).toBe(K1);
+    });
+
+    it('PATCH /admin/api/keys/:id {enabled:false} drops the key from the pool snapshot', async () => {
+      const { app, unifiedPool } = makeAppWithPools();
+      const created = await app.request('/admin/api/keys', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ label: 'k1', key: K1 }),
+      });
+      const row = (await created.json()) as { id: number };
+      const spy = vi.spyOn(unifiedPool, 'rebuild');
+      const res = await app.request(`/admin/api/keys/${row.id}`, {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalled();
+      // Snapshot is empty — disabled key is gone.
+      expect(unifiedPool.size()).toBe(0);
+    });
+
+    it('PATCH /admin/api/keys/:id {enabled:true} restores a disabled key to the pool snapshot', async () => {
+      const { app, unifiedPool } = makeAppWithPools();
+      const created = await app.request('/admin/api/keys', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ label: 'k1', key: K1 }),
+      });
+      const row = (await created.json()) as { id: number };
+      await app.request(`/admin/api/keys/${row.id}`, {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(unifiedPool.size()).toBe(0);
+      const reenable = await app.request(`/admin/api/keys/${row.id}`, {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: true }),
+      });
+      expect(reenable.status).toBe(200);
+      expect(unifiedPool.size()).toBe(1);
+    });
+
+    it('DELETE /admin/api/keys/:id drops the key from the pool snapshot', async () => {
+      const { app, unifiedPool } = makeAppWithPools();
+      await app.request('/admin/api/keys', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ label: 'k1', key: K1 }),
+      });
+      const created2 = await app.request('/admin/api/keys', {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify({ label: 'k2', key: K2 }),
+      });
+      const row2 = (await created2.json()) as { id: number };
+      expect(unifiedPool.size()).toBe(2);
+      const del = await app.request(`/admin/api/keys/${row2.id}`, {
+        method: 'DELETE',
+        headers: adminHeaders(),
+      });
+      expect(del.status).toBe(204);
+      expect(unifiedPool.size()).toBe(1);
+    });
+
+    it('DELETE /admin/api/accounts/:id drops the account from the pool snapshot', async () => {
+      const { app, unifiedPool } = makeAppWithPools();
+      const acc = store.addAccount({ email: 'a@e.com', refreshToken: 'rt' });
+      // Enable via the PATCH handler so the handler chain is exercised
+      // end-to-end (and the snapshot picks up the new enabled state).
+      const en = await app.request(`/admin/api/accounts/${acc.id}`, {
+        method: 'PATCH',
+        headers: adminHeaders(),
+        body: JSON.stringify({ enabled: true }),
+      });
+      expect(en.status).toBe(200);
+      expect(unifiedPool.size()).toBe(1);
+      const del = await app.request(`/admin/api/accounts/${acc.id}`, {
+        method: 'DELETE',
+        headers: adminHeaders(),
+      });
+      expect(del.status).toBe(204);
+      expect(unifiedPool.size()).toBe(0);
+    });
+  });
 });

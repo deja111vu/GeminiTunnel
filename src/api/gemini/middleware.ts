@@ -1,5 +1,4 @@
 // middleware.ts — unified dispatch over the enabled upstream pool.
-// Spec: docs/superpowers/specs/2026-10-14-unified-upstream-pool-design.md
 //
 // Behavior:
 //   - x-goog-api-key: <pinned> → single-shot through runKeyChat with
